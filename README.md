@@ -4,17 +4,17 @@
 
 
 # SongFormer: Scaling Music Structure Analysis with Heterogeneous Supervision
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10-brightgreen"/>
-  <img src="https://img.shields.io/badge/License-CC%20BY%204.0-lightblue"/>
-  <a href="https://github.com/ASLP-lab/SongFormer"><img src="https://img.shields.io/badge/GitHub-SongFormer-black"/></a>
-  <a href="https://huggingface.co/spaces/ASLP-lab/SongFormer"><img src="https://img.shields.io/badge/HuggingFace-space-yellow"/></a>
-  <a href="https://huggingface.co/ASLP-lab/SongFormer"><img src="https://img.shields.io/badge/HuggingFace-model-blue"/></a>
-  <a href="https://huggingface.co/datasets/ASLP-lab/SongFormDB"><img src="https://img.shields.io/badge/HF%20Dataset-SongFormDB-green"/></a>
-  <a href="https://huggingface.co/datasets/ASLP-lab/SongFormBench"><img src="https://img.shields.io/badge/HF%20Dataset-SongFormBench-orange"/></a>
-  <a href="https://discord.gg/rwcqh7Em"><img src="https://img.shields.io/badge/Discord-join%20us-purple?logo=discord&logoColor=white"/></a>
-  <a href="http://www.npu-aslp.org/"><img src="https://img.shields.io/badge/🏫-ASLP-grey?labelColor=lightgrey"/></a>
-</p>
+
+![Python](https://img.shields.io/badge/Python-3.10-brightgreen)
+![License](https://img.shields.io/badge/License-CC%20BY%204.0-lightblue)
+[![arXiv Paper](https://img.shields.io/badge/arXiv-2510.02797-blue)](https://arxiv.org/abs/2510.02797)
+[![GitHub](https://img.shields.io/badge/GitHub-SongFormer-black)](https://github.com/ASLP-lab/SongFormer)
+[![HuggingFace Space](https://img.shields.io/badge/HuggingFace-space-yellow)](https://huggingface.co/spaces/ASLP-lab/SongFormer)
+[![HuggingFace Model](https://img.shields.io/badge/HuggingFace-model-blue)](https://huggingface.co/ASLP-lab/SongFormer)
+[![Dataset SongFormDB](https://img.shields.io/badge/HF%20Dataset-SongFormDB-green)](https://huggingface.co/datasets/ASLP-lab/SongFormDB)
+[![Dataset SongFormBench](https://img.shields.io/badge/HF%20Dataset-SongFormBench-orange)](https://huggingface.co/datasets/ASLP-lab/SongFormBench)
+[![Discord](https://img.shields.io/badge/Discord-join%20us-purple?logo=discord&logoColor=white)](https://discord.gg/p5uBryC4Zs)
+[![lab](https://img.shields.io/badge/🏫-ASLP-grey?labelColor=lightgrey)](http://www.npu-aslp.org/)
 
 Chunbo Hao<sup>&ast;</sup>, Ruibin Yuan<sup>&ast;</sup>, Jixun Yao, Qixin Deng, Xinyi Bai, Wei Xue, Lei Xie<sup>&dagger;</sup>
 
@@ -282,14 +282,24 @@ bash train.sh
 
 If our work and codebase is useful for you, please cite as:
 
+````bibtex
+@misc{hao2025songformer,
+  title         = {SongFormer: Scaling Music Structure Analysis with Heterogeneous Supervision},
+  author        = {Chunbo Hao and Ruibin Yuan and Jixun Yao and Qixin Deng and Xinyi Bai and Wei Xue and Lei Xie},
+  year          = {2025},
+  eprint        = {2510.02797},
+  archivePrefix = {arXiv},
+  primaryClass  = {eess.AS},
+  url           = {https://arxiv.org/abs/2510.02797}
+}
 ````
-comming soon
-````
+
 ## License
 
 Our code is released under CC-BY-4.0 License.
 
 ## Contact Us
+
 We welcome your feedback and contributions! You can reach us through:
 
 - **Report Issues:** Found a bug or have a suggestion? Please open an issue directly in this GitHub repository. This is the best way to track and resolve problems.
