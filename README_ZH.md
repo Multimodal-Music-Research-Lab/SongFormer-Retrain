@@ -38,15 +38,12 @@ SongFormer 是一种音乐结构分析框架，利用多分辨率的自监督表
 🔥 **2025年9月26日**
 **发布 SongFormDB 与 SongFormBench** – 我们推出了大规模音乐数据集 **SongFormDB** 和综合评测基准 **SongFormBench**，均已上线 Hugging Face，助力音乐结构分析的研究与评估。
 
-## 📋 待办事项清单
+## 🚀 快速开始
 
-- [x] 完成并推送推理代码至 GitHub
-- [x] 上传模型Checkpoint至 Hugging Face Hub
-- [x] 上传论文至 arXiv
-- [x] 修复 README
-- [x] 在 Hugging Face（通过 Inference API 或 Spaces）部署开箱即用的推理版本
-- [x] 开源评估代码
-- [x] 开源训练代码
+该模型支持 Hugging Face 的 from_pretrained 方法。要快速开始使用此代码，您需要完成以下两件事：
+
+1. 按照 `设置 Python 环境` 中的说明配置您的 Python 环境
+2. 访问我们的 Hugging Face 模型页面并运行 README 中提供的代码
 
 ## 安装
 

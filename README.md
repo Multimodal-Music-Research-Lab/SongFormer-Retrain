@@ -41,15 +41,12 @@ SongFormer is a music structure analysis framework that leverages multi-resoluti
 🔥 **September 26, 2025**  
 **SongFormerDB and SongFormerBench Launched** – We introduced our large-scale music dataset **SongFormerDB** and comprehensive benchmark suite **SongFormerBench**, both now available on Hugging Face to facilitate research and evaluation in Music structure analysis.
 
-## 📋 To-Do List
+## 🚀 QuickStart
 
-- [x] Complete and push inference code to GitHub
-- [x] Upload model checkpoint(s) to Hugging Face Hub
-- [x] Upload the paper to arXiv
-- [x] Fix readme
-- [x] Deploy an out-of-the-box inference version on Hugging Face (via Inference API or Spaces)
-- [x] Open-source evaluation code
-- [x] Open-source training code
+This model supports Hugging Face's from_pretrained method. To quickly get started with this code, you need to do two things:
+
+1. Follow the instructions in `Setting up Python Environment` to configure your Python environment
+2. Visit our Hugging Face model page and run the code provided in the README
 
 ## Installation
 
