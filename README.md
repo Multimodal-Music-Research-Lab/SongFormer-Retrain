@@ -3,7 +3,7 @@
 </p>
 
 
-# SongFormer: Scaling Music Structure Analysis with Heterogeneous Supervision
+<h1 align="center">SongFormer: Scaling Music Structure Analysis with Heterogeneous Supervision</h1>
 
 ![Python](https://img.shields.io/badge/Python-3.10-brightgreen)
 ![License](https://img.shields.io/badge/License-CC%20BY%204.0-lightblue)
@@ -18,7 +18,7 @@
 
 <div align="center">
   <h3>
-    Chunbo Hao<sup>1*</sup>, Ruibin Yuan<sup>2,5*</sup>, Jixun Yao<sup>1</sup>, Qixin Deng<sup>3,5</sup>, Xinyi Bai<sup>4,5</sup>, Wei Xue<sup>2</sup>, Lei Xie<sup>1†</sup>
+    Chunbo Hao<sup>1*</sup>, Ruibin Yuan<sup>2,5*</sup>, Jixun Yao<sup>1</sup>, Qixin Deng<sup>3,5</sup>,<br>Xinyi Bai<sup>4,5</sup>, Wei Xue<sup>2</sup>, Lei Xie<sup>1†</sup>
   </h3>
   
   <p>
@@ -26,7 +26,7 @@
   </p>
   
   <p>
-    <sup>1</sup>Audio, Speech and Language Processing Group (ASLP@NPU), Northwestern Polytechnical University<br>
+    <sup>1</sup>Audio, Speech and Language Processing Group (ASLP@NPU),<br>Northwestern Polytechnical University<br>
     <sup>2</sup>Hong Kong University of Science and Technology<br>
     <sup>3</sup>Northwestern University<br>
     <sup>4</sup>Cornell University<br>
