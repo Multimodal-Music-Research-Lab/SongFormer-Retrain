@@ -85,6 +85,71 @@ This model supports Hugging Face's from_pretrained method. To quickly get starte
 1. Follow the instructions in `Setting up Python Environment` to configure your Python environment
 2. Visit our [Hugging Face model page](https://huggingface.co/ASLP-lab/SongFormer), and run the code provided in the README
 
+## 🌟 Key Highlights
+
+We've achieved **breakthrough performance** in music structure analysis, setting new benchmarks across the board:
+
+- ✨ **State-of-the-art accuracy** on both Western and Chinese music datasets
+- ⚡ **Blazing fast inference** - faster than comparable models
+- 💰 **Cost-effective** - No API fees, runs locally on single GPU
+
+### ⏱️ Speed Comparison
+
+**Process entire songs in just 2-4 seconds!** Here's how we stack up:
+
+| Model                   | Processing Time | Note            |
+| ----------------------- | --------------- | --------------- |
+| **🏆 SongFormer (Ours)** | **2-4 seconds** |                 |
+| LinkSeg-7Labels         | 3-5 seconds     |                 |
+| All-In-One              | 9-12 seconds    |                 |
+| SongPrep Fine-tuned     | 9-12 seconds    |                 |
+| SongPrep End2End        | 22-26 seconds   | Contains lyrics |
+| Gemini 2.5 Pro          | 30-90 seconds   | Contains lyrics |
+
+*Benchmarked on NVIDIA L40 GPU (excluding model loading)*
+
+### 📊 Performance Metrics
+
+- **ACC**: Overall boundary detection accuracy
+- **HR.5F**: Hit Rate with 0.5-second tolerance (fine-grained precision)
+- **HR3F**: Hit Rate with 3-second tolerance
+
+#### SongFormBench-HarmonixSet
+
+| Method                   | ACC       | HR.5F     | HR3F      |
+| ------------------------ | --------- | --------- | --------- |
+| **Baseline Methods**     |           |           |           |
+| Harmonic-CNN*            | 0.680     | 0.559     | —         |
+| SpecTNT (24s)*           | 0.701     | 0.570     | —         |
+| SpecTNT (36s)*           | 0.723     | 0.558     | —         |
+| All-In-One               | 0.740     | 0.596     | 0.730     |
+| MERT (5s)*               | 0.574     | 0.626     | —         |
+| MusicFM-Zhang et al.*    | 0.725     | 0.640     | 0.729     |
+| MuQ_iter*                | 0.772     | —         | —         |
+| LinkSeg-7Labels          | 0.780     | 0.630     | 0.762     |
+| TA (Zhang et al., 2025)* | 0.787     | 0.610     | 0.801     |
+| Gemini 2.5 Pro           | 0.748     | 0.423     | **0.813** |
+| **SongFormer (Ours)**    |           |           |           |
+| SongFormer (HX)          | 0.795     | **0.703** | 0.784     |
+| SongFormer (HX+P+H)      | 0.806     | 0.697     | 0.780     |
+| SongFormer (HX+P+H+G)    | **0.807** | 0.696     | 0.780     |
+
+#### SongFormBench-CN
+
+| Method                | ACC       | HR.5F     | HR3F      |
+| --------------------- | --------- | --------- | --------- |
+| **Baseline Methods**  |           |           |           |
+| All-In-One            | 0.834     | 0.563     | 0.771     |
+| LinkSeg-7Labels       | 0.828     | 0.518     | 0.757     |
+| Gemini 2.5 Pro        | 0.806     | 0.412     | 0.833     |
+| **SongFormer (Ours)** |           |           |           |
+| SongFormer (HX)       | 0.848     | 0.675     | **0.856** |
+| SongFormer (HX+P+H)   | 0.890     | **0.690** | 0.852     |
+| SongFormer (HX+P+H+G) | **0.891** | 0.688     | 0.851     |
+
+- Results marked with * are taken from original papers due to unavailable implementations
+- Dataset abbreviations: HX (HarmonixSet), P, H, G refer to different training datasets as stated in the paper
+
 ## Installation
 
 ### Setting up Python Environment
