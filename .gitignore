@@ -21,7 +21,10 @@ env/
 *.log
 
 # models
-/runs/hx_retrain_v1/
+/runs/hx_retrain_v1/results/train_output_42/
+/runs/hx_retrain_v1/results/ssl/
+/runs/hx_retrain_v1/results/bench_pred/
+/runs/hx_retrain_v1/results/eval/
 /runs/hx_train_hooktheory_v1/
 /runs/hx_train_hooktheory_v2/
 tensorboard_logs/
