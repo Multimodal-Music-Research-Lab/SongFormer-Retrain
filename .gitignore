@@ -20,11 +20,12 @@ env/
 # Data files (data used for training or testing)
 *.log
 
-# TensorBoard logs
+# models
 /runs/hx_retrain_v1/
 /runs/hx_train_hooktheory_v1/
 /runs/hx_train_hooktheory_v2/
 tensorboard_logs/
+/src/SongFormer/ckpts/
 
 # Operating system files
 .DS_Store
