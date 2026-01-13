@@ -23,7 +23,7 @@ import os
 import random
 from .HookTheoryAdapter import HookTheoryAdapter
 from .GeminiOnlyLabelAdapter import GeminiOnlyLabelAdapter
-
+from .HookTheoryV1Adapter import HookTheoryV1Adapter
 
 class Dataset(Dataset):
     def get_ids_from_dir(self, dir_path: str):
@@ -79,6 +79,13 @@ class Dataset(Dataset):
                         GeminiOnlyLabelAdapter(
                             **dataset_abstract_item, hparams=self.hparams
                         )
+                    )
+                    valid_data_ids = self.adapter_obj[
+                        dataset_abstract_item["internal_tmp_id"]
+                    ].get_ids()
+                elif adapter == "HookTheoryV1Adapter":
+                    self.adapter_obj[dataset_abstract_item["internal_tmp_id"]] = (
+                        HookTheoryV1Adapter(**dataset_abstract_item, hparams=self.hparams)
                     )
                     valid_data_ids = self.adapter_obj[
                         dataset_abstract_item["internal_tmp_id"]
@@ -205,6 +212,13 @@ class Dataset(Dataset):
                         end_time=start_time + self.SLICE_DUR,
                     )
                 elif adapter_str == "GeminiOnlyLabelAdapter":
+                    start_time = int(utt.split("_")[-1])
+                    return self.adapter_obj[internal_tmp_id].get_item_json(
+                        utt=utt,
+                        start_time=start_time,
+                        end_time=start_time + self.SLICE_DUR,
+                    )
+                elif adapter_str == "HookTheoryV1Adapter":
                     start_time = int(utt.split("_")[-1])
                     return self.adapter_obj[internal_tmp_id].get_item_json(
                         utt=utt,
