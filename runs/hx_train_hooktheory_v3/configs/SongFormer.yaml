@@ -1,0 +1,176 @@
+# ============================
+# Model Configuration
+# ============================
+
+input_dim_raw: 4096
+input_dim: 2048
+
+# Downsampling Module
+down_sample_conv_kernel_size: 3
+down_sample_conv_stride: 3
+down_sample_conv_dropout: 0.1
+down_sample_conv_padding: 0
+
+# Transformer Module
+transformer_encoder_input_dim: 1024
+transformer_input_dim: 512
+num_transformer_layers: 4
+transformer_nhead: 8
+transformer_dropout: 0.1
+
+# task-specific heads
+boundary_head_hidden_dims: [128, 64, 8]
+function_head_hidden_dims: []
+
+num_classes: 128
+num_dataset_classes: 64
+
+# scheduler
+warmup_steps: 300
+total_steps: 12010
+warmup_max_lr: 0.0001
+
+# frame rates after downsampling
+output_logits_frame_rates: 8.333
+downsample_rates: 3
+frame_rates: 8.333
+
+# ema config
+ema_kwargs:
+  { update_after_step: 200 }
+
+# ============================
+# Loss Functions configuration
+# ============================
+
+# Focal loss
+label_focal_loss_weight: 0.2
+label_focal_loss_alpha: 0.25
+label_focal_loss_gamma: 2.0
+
+# Boundary TV loss
+boundary_tvloss_weight: 0.05
+boundary_tv_loss_beta: 0.6
+boundary_tv_loss_lambda: 0.4
+boundary_tv_loss_boundary_threshold: 0.01
+boundary_tv_loss_reduction_weight: 0.1
+
+loss_weight_section: 0.2
+loss_weight_function: 0.8
+
+# ============================
+# Training config
+# ============================
+
+num_neighbors: 10
+learn_label: true
+learn_segment: true
+accumulation_steps: 2
+slice_dur: 420
+early_stopping_step: 3
+local_maxima_filter_size: 3
+
+# ============================
+# Dataset config
+# ============================
+
+train_dataset:
+  _target_: dataset.SongFormerDataset.Dataset
+  dataset_abstracts:
+    [
+      # ====== HX train======
+      {
+        "internal_tmp_id": "SongForm-HX-8Class",
+        "dataset_type": "SongForm-HX-8Class",
+        "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/420s/layer_10",
+        "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl",
+        "split_ids_path": "/home/hbli/songformer/repo/SongFormer/runs/hx_train_hooktheory_v3/results/train_hx.txt",
+        "multiplier": 4
+      },
+
+      # ====== HookTheory train======
+      {
+        "internal_tmp_id": "HookTheoryV3-8Class_train",
+        "dataset_type": "HookTheoryV1-8Class",
+        "adapter": "HookTheoryV1Adapter",
+        "structure_jsonl_paths": [
+          "/home/hbli/songformer/repo/SongFormer/runs/hx_train_hooktheory_v3/results/HookTheoryV3_for_model.jsonl"
+        ],
+        "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/muq/420s/layer_10",
+        "split_ids_path": "/home/hbli/songformer/repo/SongFormer/runs/hx_train_hooktheory_v3/results/train.txt",
+        "multiplier": 4
+      }
+    ]
+  hparams:
+    output_logits_frame_rates: ${output_logits_frame_rates}
+    downsample_rates: ${downsample_rates}
+    num_neighbors: ${num_neighbors}
+    input_dim: ${input_dim_raw}
+    slice_dur: ${slice_dur}
+    num_classes: ${num_classes}
+    frame_rates: ${frame_rates}
+
+# ===== eval (keep original HX val 200) =====
+eval_dataset:
+  _target_: dataset.SongFormerDataset.Dataset
+  dataset_abstracts:
+    [
+      {
+        "internal_tmp_id": "SongForm-HX-8Classs_val",
+        "dataset_type": "SongForm-HX-8Class",
+        "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/420s/layer_10",
+        "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl",
+        "split_ids_path": "/home/hbli/songformer/repo/SongFormer/runs/hx_train_hooktheory_v3/results/val.txt",
+        "multiplier": 1
+      }
+    ]
+  hparams:
+    output_logits_frame_rates: ${output_logits_frame_rates}
+    downsample_rates: ${downsample_rates}
+    num_neighbors: ${num_neighbors}
+    input_dim: ${input_dim_raw}
+    slice_dur: ${slice_dur}
+    num_classes: ${num_classes}
+    frame_rates: ${frame_rates}
+
+# ============================
+# DataLoader configuration
+# ============================
+
+train_dataloader:
+  num_workers: 4
+  batch_size: 4
+  pin_memory: True
+  prefetch_factor: 4
+  drop_last: True
+  persistent_workers: True
+  shuffle: true
+
+eval_dataloader:
+  num_workers: 0
+  batch_size: 1
+  shuffle: false
+
+# ============================
+# Optimizer configuration
+# ============================
+
+optimizer:
+  lr: ${warmup_max_lr}
+  betas: [0.8, 0.999]
+  eps: 1e-08
+  weight_decay: 3e-7
+
+# ============================
+# Training Run configuration
+# ============================
+
+args:
+  run_name: hx_train_hooktheory_v3
+  model_name: SongFormer
+  save_interval: 800
+  eval_interval: 800
+  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/train_output
+  max_epochs: 1000
+  max_steps: 12010
+  tags: null
