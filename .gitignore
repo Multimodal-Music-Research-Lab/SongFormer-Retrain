@@ -24,6 +24,7 @@ env/
 /runs/hx_retrain_v1/
 # /runs/hx_train_hooktheory_v1/
 /runs/hx_train_hooktheory_v2/
+/runs/hx_train_hooktheory_v3/
 tensorboard_logs/
 /src/SongFormer/ckpts/
 
