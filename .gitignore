@@ -26,6 +26,7 @@ env/
 /runs/hx_train_hooktheory_v2/
 tensorboard_logs/
 /src/SongFormer/ckpts/
+/src/third_party/text_models/ 
 
 # Operating system files
 .DS_Store
