@@ -264,6 +264,26 @@ class Model(nn.Module):
             dropout=config.down_sample_conv_dropout,
             padding=config.down_sample_conv_padding,
         )
+        # =========================
+        # [ADDED FOR LYRICS] optional lyrics conditioning branch
+        # =========================
+        self.use_lyrics = getattr(config, "use_lyrics", False)
+        self.lyrics_input_dim = getattr(config, "lyrics_input_dim", 1024)
+        self.lyrics_dropout = getattr(config, "lyrics_dropout", 0.1)
+
+        if self.use_lyrics:
+            self.lyrics_proj = nn.Sequential(
+                nn.Linear(
+                    self.lyrics_input_dim,
+                    config.transformer_encoder_input_dim,
+                ),
+                nn.LayerNorm(config.transformer_encoder_input_dim),
+                nn.GELU(),
+                nn.Dropout(self.lyrics_dropout),
+            )
+        else:
+            self.lyrics_proj = None
+        
         self.AddFuse = AddFuse()
         self.transformer = WrapedTransformerEncoder(
             input_dim=config.transformer_encoder_input_dim,
@@ -357,6 +377,46 @@ class Model(nn.Module):
                 total_score += duration
         return total_score / total_duration
 
+    # =========================
+    # [ADDED FOR LYRICS]
+    # Fuse optional song-level lyrics embedding into the sequence.
+    # If has_lyrics == 0, the projected lyrics condition is fully zeroed out,
+    # so samples without lyrics will not inject bias into training.
+    # =========================
+    def fuse_lyrics_condition(self, x, lyrics_embeddings=None, has_lyrics=None):
+        """
+        Args:
+            x: [B, T, D]
+            lyrics_embeddings: [B, lyrics_input_dim]
+            has_lyrics: [B] or [B, 1], 1 means valid lyrics embedding exists
+        """
+        if (not self.use_lyrics) or (lyrics_embeddings is None):
+            return x
+
+        if not isinstance(lyrics_embeddings, torch.Tensor):
+            lyrics_embeddings = torch.tensor(lyrics_embeddings, device=x.device)
+
+        lyrics_embeddings = lyrics_embeddings.to(x.device).float()
+        lyrics_cond = self.lyrics_proj(lyrics_embeddings)  # [B, D]
+
+        if has_lyrics is None:
+            has_lyrics = torch.zeros(
+                lyrics_cond.size(0),
+                1,
+                device=x.device,
+                dtype=lyrics_cond.dtype,
+            )
+        else:
+            if not isinstance(has_lyrics, torch.Tensor):
+                has_lyrics = torch.tensor(has_lyrics, device=x.device)
+            has_lyrics = has_lyrics.to(x.device).float().view(-1, 1)
+
+        # [ADDED FOR LYRICS]
+        # Important: mask AFTER projection so that projection bias is also removed
+        lyrics_cond = lyrics_cond * has_lyrics
+
+        return self.AddFuse(x=x, cond=lyrics_cond.unsqueeze(1))
+
     def infer_with_metrics(self, batch, prefix: str = None):
         with torch.no_grad():
             logits = self.forward_func(batch)
@@ -402,6 +462,8 @@ class Model(nn.Module):
         input_embeddings,
         dataset_ids,
         label_id_masks,
+        lyrics_embeddings=None,   # [ADDED FOR LYRICS]
+        has_lyrics=None,          # [ADDED FOR LYRICS]
         prefix: str = None,
         with_logits=False,
     ):
@@ -410,11 +472,20 @@ class Model(nn.Module):
             input_embeddings = self.input_norm(input_embeddings)
             logits = self.down_sample_conv(input_embeddings)
 
+            # original source token branch (kept for fair comparison)
             dataset_prefix = self.dataset_class_prefix(dataset_ids)
             dataset_prefix_expand = dataset_prefix.unsqueeze(1).expand(
                 logits.size(0), 1, -1
             )
             logits = self.AddFuse(x=logits, cond=dataset_prefix_expand)
+
+            # [ADDED FOR LYRICS]
+            logits = self.fuse_lyrics_condition(
+                x=logits,
+                lyrics_embeddings=lyrics_embeddings,
+                has_lyrics=has_lyrics,
+            )
+
             logits = self.transformer(x=logits, src_key_padding_mask=None)
 
             function_logits = self.function_head(logits)
@@ -501,8 +572,17 @@ class Model(nn.Module):
         input_embeddings = self.input_norm(input_embeddings)
         logits = self.down_sample_conv(input_embeddings)
 
+        # original source token branch (kept for fair comparison)
         dataset_prefix = self.dataset_class_prefix(batch["dataset_ids"])
         logits = self.AddFuse(x=logits, cond=dataset_prefix.unsqueeze(1))
+
+        # [ADDED FOR LYRICS]
+        logits = self.fuse_lyrics_condition(
+            x=logits,
+            lyrics_embeddings=batch.get("lyrics_embeddings", None),
+            has_lyrics=batch.get("has_lyrics", None),
+        )
+
         src_key_padding_mask = batch["masks"]
         logits = self.transformer(x=logits, src_key_padding_mask=src_key_padding_mask)
 

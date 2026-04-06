@@ -22,6 +22,7 @@ from pathlib import Path
 import os
 import random
 from .HookTheoryAdapter import HookTheoryAdapter
+from .HookTheoryV1Adapter import HookTheoryV1Adapter
 from .GeminiOnlyLabelAdapter import GeminiOnlyLabelAdapter
 
 
@@ -30,6 +31,38 @@ class Dataset(Dataset):
         ids = os.listdir(dir_path)
         ids = [Path(x).stem for x in ids if x.endswith(".npy")]
         return set(ids)
+    # =========================
+    # [ADDED FOR LYRICS]
+    # =========================
+    def get_zero_lyrics_embedding(self):
+        return np.zeros((self.lyrics_input_dim,), dtype=np.float32)
+
+    # =========================
+    # [ADDED FOR LYRICS]
+    # song_id should be the song-level stem, e.g. HX_0001_12step
+    # =========================
+    def try_load_lyrics_embedding(self, internal_tmp_id: str, song_id: str):
+        if not self.use_lyrics:
+            return None, False
+
+        lyrics_dir = self.lyrics_embedding_dir.get(internal_tmp_id, None)
+        if lyrics_dir is None or str(lyrics_dir).strip() == "":
+            return self.get_zero_lyrics_embedding(), False
+
+        lyrics_path = Path(lyrics_dir) / f"{song_id}.npy"
+        if not lyrics_path.exists():
+            return self.get_zero_lyrics_embedding(), False
+
+        lyrics_embedding = np.load(lyrics_path, allow_pickle=False)
+        lyrics_embedding = np.asarray(lyrics_embedding, dtype=np.float32).reshape(-1)
+
+        if lyrics_embedding.shape[0] != self.lyrics_input_dim:
+            raise ValueError(
+                f"Lyrics embedding dim mismatch for {lyrics_path}: "
+                f"{lyrics_embedding.shape[0]} vs expected {self.lyrics_input_dim}"
+            )
+
+        return lyrics_embedding, True
 
     def __init__(
         self,
@@ -51,6 +84,12 @@ class Dataset(Dataset):
 
         self.input_embedding_dir = {}
         self.EPS = 1e-6
+        # =========================
+        # [ADDED FOR LYRICS]
+        # =========================
+        self.use_lyrics = getattr(self.hparams, "use_lyrics", False)
+        self.lyrics_input_dim = getattr(self.hparams, "lyrics_input_dim", 1024)
+        self.lyrics_embedding_dir = {}
 
         # build dataset-specific label mask
         for key, allowed_ids in DATASET_ID_ALLOWED_LABEL_IDS.items():
@@ -83,6 +122,13 @@ class Dataset(Dataset):
                     valid_data_ids = self.adapter_obj[
                         dataset_abstract_item["internal_tmp_id"]
                     ].get_ids()
+                elif adapter == "HookTheoryV1Adapter":
+                    self.adapter_obj[dataset_abstract_item["internal_tmp_id"]] = (
+                        HookTheoryV1Adapter(**dataset_abstract_item, hparams=self.hparams)
+                    )
+                    valid_data_ids = self.adapter_obj[
+                        dataset_abstract_item["internal_tmp_id"]
+                    ].get_ids()
                 else:
                     raise ValueError(f"Unknown adapter: {adapter}")
 
@@ -107,6 +153,15 @@ class Dataset(Dataset):
                     "input_embedding_dir"
                 ]
 
+                # =========================
+                # [ADDED FOR LYRICS]
+                # Only HX will provide a valid lyrics dir for now.
+                # Private / Hook can leave it empty or absent.
+                # =========================
+                self.lyrics_embedding_dir[internal_tmp_id] = dataset_abstract_item.get(
+                    "lyrics_embedding_dir", None
+                )
+                
                 valid_data_ids = self.get_ids_from_dir(all_input_embedding_dirs[0])
                 for x in all_input_embedding_dirs:
                     valid_data_ids = valid_data_ids.intersection(
@@ -204,6 +259,13 @@ class Dataset(Dataset):
                         start_time=start_time,
                         end_time=start_time + self.SLICE_DUR,
                     )
+                elif adapter_str == "HookTheoryV1Adapter":
+                    start_time = int(utt.split("_")[-1])
+                    return self.adapter_obj[internal_tmp_id].get_item_json(
+                        utt=utt,
+                        start_time=start_time,
+                        end_time=start_time + self.SLICE_DUR,
+                    )
                 elif adapter_str == "GeminiOnlyLabelAdapter":
                     start_time = int(utt.split("_")[-1])
                     return self.adapter_obj[internal_tmp_id].get_item_json(
@@ -244,6 +306,15 @@ class Dataset(Dataset):
             utt_id_with_start_sec = utt
             utt = "_".join(utt.split("_")[:-1])
             end_time = start_time + self.SLICE_DUR
+
+            # =========================
+            # [ADDED FOR LYRICS]
+            # utt is now song-level id, e.g. HX_0001_12step
+            # =========================
+            lyrics_embedding, has_lyrics = self.try_load_lyrics_embedding(
+                internal_tmp_id=internal_tmp_id,
+                song_id=utt,
+            )
 
             local_times = np.array(
                 copy.deepcopy(self.time_datas[f"{internal_tmp_id}_{utt}"])
@@ -336,6 +407,11 @@ class Dataset(Dataset):
                 "label_id_mask": self.dataset_id2label_mask[
                     self.dataset_id_to_dataset_id[dataset_label]
                 ],
+                # =========================
+                # [ADDED FOR LYRICS]
+                # =========================
+                "lyrics_embedding": lyrics_embedding,
+                "has_lyrics": has_lyrics,
             }
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -379,6 +455,16 @@ class Dataset(Dataset):
             )
             boundary_mask = np.zeros((len(batch), max_sequence_length), dtype=bool)
             function_mask = np.zeros((len(batch), max_sequence_length), dtype=bool)
+            # =========================
+            # [ADDED FOR LYRICS]
+            # lyrics is song-level, so shape is [B, D]
+            # For samples without lyrics, keep zero vector and has_lyrics = 0
+            # =========================
+            if self.use_lyrics:
+                lyrics_embeddings = np.zeros(
+                    (len(batch), self.lyrics_input_dim), dtype=np.float32
+                )
+                has_lyrics = np.zeros((len(batch),), dtype=np.float32)
             true_function_lists = []
             msa_infos = []
             dataset_ids = []
@@ -403,6 +489,15 @@ class Dataset(Dataset):
                 msa_infos.append(item["msa_info"])
                 dataset_ids.append(item["dataset_id"])
                 label_id_masks.append(item["label_id_mask"])
+                # =========================
+                # [ADDED FOR LYRICS]
+                # Hook / Private / missing-HX samples will naturally fall back to zero vector
+                # =========================
+                if self.use_lyrics:
+                    item_lyrics = item.get("lyrics_embedding", None)
+                    if item_lyrics is not None:
+                        lyrics_embeddings[idx] = item_lyrics
+                    has_lyrics[idx] = float(item.get("has_lyrics", False))
                 if boundary_mask is not None:
                     boundary_mask[idx, : item["mask"].shape[0]] = item.get(
                         "boundary_mask", np.zeros(item["mask"].shape[0], dtype=bool)
@@ -428,7 +523,13 @@ class Dataset(Dataset):
             label_id_masks = torch.from_numpy(
                 np.stack(label_id_masks, axis=0, dtype=bool)[:, np.newaxis, :]
             )
-
+            # =========================
+            # [ADDED FOR LYRICS]
+            # =========================
+            if self.use_lyrics:
+                lyrics_embeddings = torch.from_numpy(lyrics_embeddings).float()
+                has_lyrics = torch.from_numpy(has_lyrics).float()
+                
             return_json = {
                 "data_ids": data_ids,
                 "input_embeddings": input_embeddings,
@@ -443,6 +544,13 @@ class Dataset(Dataset):
                 "boundary_mask": boundary_mask,
                 "function_mask": function_mask,
             }
+            
+            # =========================
+            # [ADDED FOR LYRICS]
+            # =========================
+            if self.use_lyrics:
+                return_json["lyrics_embeddings"] = lyrics_embeddings
+                return_json["has_lyrics"] = has_lyrics
 
             return return_json
         except Exception as e:
