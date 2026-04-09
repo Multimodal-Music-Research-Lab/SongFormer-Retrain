@@ -91,7 +91,7 @@ train_dataset:
         "internal_tmp_id": "SongForm-HX-8Class",
         "dataset_type": "SongForm-HX-8Class",
         "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/420s/layer_10",
-        "lyrics_embedding_dir": "/mnt/ssd/hbli/songformer/runs/SSL/ssl_lyrics/multilingual-e5-large/harmonixset/",   # [ADDED FOR LYRICS]
+        "lyrics_embedding_dir": "/mnt/ssd/hbli/songformer/runs/SSL/ssl_lyrics/multilingual-e5-large/harmonixset/v2",
         "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl",
         "split_ids_path": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/train_hx.txt",
         "multiplier": 4
@@ -106,7 +106,7 @@ train_dataset:
           "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/HookTheoryV3_for_model.jsonl"
         ],
         "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/muq/420s/layer_10",
-        "lyrics_embedding_dir": "/mnt/ssd/hbli/songformer/runs/SSL/ssl_lyrics/multilingual-e5-large/hooktheory/",   # [ADDED FOR LYRICS]
+        "lyrics_embedding_dir": "/mnt/ssd/hbli/songformer/runs/SSL/ssl_lyrics/multilingual-e5-large/hooktheory/v2",
         "split_ids_path": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/train_hook.txt",
         "multiplier": 4
       }
@@ -134,7 +134,7 @@ eval_dataset:
         "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/420s/layer_10",
         "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl",
         "split_ids_path": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/val.txt",
-        "lyrics_embedding_dir": "/mnt/ssd/hbli/songformer/runs/SSL/ssl_lyrics/multilingual-e5-large/harmonixset/",
+        "lyrics_embedding_dir": "/mnt/ssd/hbli/songformer/runs/SSL/ssl_lyrics/multilingual-e5-large/harmonixset/v2",
         "multiplier": 1
       }
     ]
@@ -186,7 +186,7 @@ args:
   model_name: SongFormer
   save_interval: 800
   eval_interval: 800
-  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_lyrics_v2/results/train_output_v2
+  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_lyrics_v2/results/train_output
   max_epochs: 1000
   max_steps: 12010
   tags: null

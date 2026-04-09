@@ -387,7 +387,9 @@ class Model(nn.Module):
         """
         Args:
             x: [B, T, D]
-            lyrics_embeddings: [B, lyrics_input_dim]
+            lyrics_embeddings:
+                - old mode: [B, lyrics_input_dim]
+                - new mode: [B, T, lyrics_input_dim]
             has_lyrics: [B] or [B, 1], 1 means valid lyrics embedding exists
         """
         if (not self.use_lyrics) or (lyrics_embeddings is None):
@@ -397,11 +399,24 @@ class Model(nn.Module):
             lyrics_embeddings = torch.tensor(lyrics_embeddings, device=x.device)
 
         lyrics_embeddings = lyrics_embeddings.to(x.device).float()
-        lyrics_cond = self.lyrics_proj(lyrics_embeddings)  # [B, D]
+
+        # backward compatibility:
+        # old song-level vector [B, D] -> expand to [B, T, D]
+        if lyrics_embeddings.dim() == 2:
+            lyrics_embeddings = lyrics_embeddings.unsqueeze(1).expand(-1, x.size(1), -1)
+
+        # expected new mode: [B, T, lyrics_input_dim]
+        if lyrics_embeddings.dim() != 3:
+            raise ValueError(
+                f"lyrics_embeddings must be 2D or 3D, got shape={lyrics_embeddings.shape}"
+            )
+
+        lyrics_cond = self.lyrics_proj(lyrics_embeddings)  # [B, T, D]
 
         if has_lyrics is None:
             has_lyrics = torch.zeros(
                 lyrics_cond.size(0),
+                1,
                 1,
                 device=x.device,
                 dtype=lyrics_cond.dtype,
@@ -409,13 +424,12 @@ class Model(nn.Module):
         else:
             if not isinstance(has_lyrics, torch.Tensor):
                 has_lyrics = torch.tensor(has_lyrics, device=x.device)
-            has_lyrics = has_lyrics.to(x.device).float().view(-1, 1)
+            has_lyrics = has_lyrics.to(x.device).float().view(-1, 1, 1)
 
-        # [ADDED FOR LYRICS]
-        # Important: mask AFTER projection so that projection bias is also removed
+        # mask AFTER projection so projection bias is also removed
         lyrics_cond = lyrics_cond * has_lyrics
 
-        return self.AddFuse(x=x, cond=lyrics_cond.unsqueeze(1))
+        return self.AddFuse(x=x, cond=lyrics_cond)
 
     def infer_with_metrics(self, batch, prefix: str = None):
         with torch.no_grad():

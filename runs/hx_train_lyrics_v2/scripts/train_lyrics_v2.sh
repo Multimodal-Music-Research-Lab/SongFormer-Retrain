@@ -23,7 +23,7 @@ export HF_HOME=/home/hbli/songformer/cache/hf_cache
 
 gpustat --id $CUDA_VISIBLE_DEVICES
 
-CFG=/home/hbli/songformer/repo/SongFormer/runs/hx_train_lyrics_v1/configs/SongFormer.yaml
+CFG=/home/hbli/songformer/repo/SongFormer/runs/hx_train_lyrics_v2/configs/SongFormer.yaml
 INIT_SEED=42
 
 # ===== Train =====
