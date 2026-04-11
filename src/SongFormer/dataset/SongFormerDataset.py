@@ -104,6 +104,7 @@ class Dataset(Dataset):
         for dataset_abstract_item in dataset_abstracts:
             adapter = dataset_abstract_item.get("adapter", None)
             if adapter is not None:
+                self.lyrics_embedding_dir[dataset_abstract_item["internal_tmp_id"]] = dataset_abstract_item.get("lyrics_embedding_dir", None)
                 # adapter-based dataset (pre-wrapped)
                 assert isinstance(adapter, str)
                 if adapter == "HookTheoryAdapter":
@@ -252,29 +253,52 @@ class Dataset(Dataset):
             if adapter_str is not None:
                 # handle adapter-wrapped entries
                 assert isinstance(adapter_str, str)
+
+                start_time = int(utt.split("_")[-1])
+
                 if adapter_str == "HookTheoryAdapter":
-                    start_time = int(utt.split("_")[-1])
-                    return self.adapter_obj[internal_tmp_id].get_item_json(
+                    item_json = self.adapter_obj[internal_tmp_id].get_item_json(
                         utt=utt,
                         start_time=start_time,
                         end_time=start_time + self.SLICE_DUR,
                     )
                 elif adapter_str == "HookTheoryV1Adapter":
-                    start_time = int(utt.split("_")[-1])
-                    return self.adapter_obj[internal_tmp_id].get_item_json(
+                    item_json = self.adapter_obj[internal_tmp_id].get_item_json(
                         utt=utt,
                         start_time=start_time,
                         end_time=start_time + self.SLICE_DUR,
                     )
                 elif adapter_str == "GeminiOnlyLabelAdapter":
-                    start_time = int(utt.split("_")[-1])
-                    return self.adapter_obj[internal_tmp_id].get_item_json(
+                    item_json = self.adapter_obj[internal_tmp_id].get_item_json(
                         utt=utt,
                         start_time=start_time,
                         end_time=start_time + self.SLICE_DUR,
                     )
                 else:
                     raise ValueError(f"Unknown adapter: {adapter_str}")
+
+                if item_json is None:
+                    return None
+
+                # =========================
+                # [ADDED FOR LYRICS]
+                # For adapter-based datasets (e.g. HookTheoryV1Adapter),
+                # the song-level id is the chunk stem without the trailing start_time.
+                # Example:
+                #   utt = "070-shake_guilty-conscience_kygz-KaPmKB_0"
+                #   song_id = "070-shake_guilty-conscience_kygz-KaPmKB"
+                # =========================
+                song_id = "_".join(utt.split("_")[:-1])
+
+                lyrics_embedding, has_lyrics = self.try_load_lyrics_embedding(
+                    internal_tmp_id=internal_tmp_id,
+                    song_id=song_id,
+                )
+
+                item_json["lyrics_embedding"] = lyrics_embedding
+                item_json["has_lyrics"] = has_lyrics
+
+                return item_json
 
             # load embeddings from configured dirs
             embd_list = []
