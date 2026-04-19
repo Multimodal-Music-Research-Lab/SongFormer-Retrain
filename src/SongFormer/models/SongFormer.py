@@ -265,24 +265,66 @@ class Model(nn.Module):
             padding=config.down_sample_conv_padding,
         )
         # =========================
-        # [ADDED FOR LYRICS] optional lyrics conditioning branch
+        # [ADDED FOR LYRICS]
+        # dual-path cross-attention:
+        #   audio tokens as query
+        #   line/stanza embeddings as key/value
+        # then gated additive fusion
         # =========================
         self.use_lyrics = getattr(config, "use_lyrics", False)
         self.lyrics_input_dim = getattr(config, "lyrics_input_dim", 1024)
         self.lyrics_dropout = getattr(config, "lyrics_dropout", 0.1)
+        self.lyrics_attn_num_heads = getattr(
+            config, "lyrics_attn_num_heads", config.transformer_nhead
+        )
+        self.lyrics_attn_dropout = getattr(
+            config, "lyrics_attn_dropout", config.transformer_dropout
+        )
+        self.lyrics_use_gate = getattr(config, "lyrics_use_gate", True)
 
         if self.use_lyrics:
-            self.lyrics_proj = nn.Sequential(
-                nn.Linear(
-                    self.lyrics_input_dim,
-                    config.transformer_encoder_input_dim,
-                ),
+            self.line_lyrics_proj = nn.Sequential(
+                nn.Linear(self.lyrics_input_dim, config.transformer_encoder_input_dim),
                 nn.LayerNorm(config.transformer_encoder_input_dim),
                 nn.GELU(),
                 nn.Dropout(self.lyrics_dropout),
             )
+            self.stanza_lyrics_proj = nn.Sequential(
+                nn.Linear(self.lyrics_input_dim, config.transformer_encoder_input_dim),
+                nn.LayerNorm(config.transformer_encoder_input_dim),
+                nn.GELU(),
+                nn.Dropout(self.lyrics_dropout),
+            )
+
+            self.line_cross_attn = nn.MultiheadAttention(
+                embed_dim=config.transformer_encoder_input_dim,
+                num_heads=self.lyrics_attn_num_heads,
+                dropout=self.lyrics_attn_dropout,
+                batch_first=True,
+            )
+            self.stanza_cross_attn = nn.MultiheadAttention(
+                embed_dim=config.transformer_encoder_input_dim,
+                num_heads=self.lyrics_attn_num_heads,
+                dropout=self.lyrics_attn_dropout,
+                batch_first=True,
+            )
+
+            if self.lyrics_use_gate:
+                self.lyrics_gate = nn.Linear(
+                    config.transformer_encoder_input_dim * 2,
+                    config.transformer_encoder_input_dim,
+                )
+            else:
+                self.lyrics_gate = None
         else:
-            self.lyrics_proj = None
+            self.line_lyrics_proj = None
+            self.stanza_lyrics_proj = None
+            self.line_cross_attn = None
+            self.stanza_cross_attn = None
+            self.lyrics_gate = None
+
+        # cache debug stats from the latest forward
+        self.latest_lyrics_debug = {}
         
         self.AddFuse = AddFuse()
         self.transformer = WrapedTransformerEncoder(
@@ -377,59 +419,204 @@ class Model(nn.Module):
                 total_score += duration
         return total_score / total_duration
 
+    def _get_has_lyrics_sample_mask(self, has_lyrics, device):
+        """
+        Convert has_lyrics -> [B] bool mask.
+        Only samples with has_lyrics > 0.5 are used in debug statistics.
+        """
+        if has_lyrics is None:
+            return None
+        if not isinstance(has_lyrics, torch.Tensor):
+            has_lyrics = torch.tensor(has_lyrics, device=device)
+        return has_lyrics.to(device).float().view(-1) > 0.5
+
+
+    def _collect_gate_stats(self, gate: torch.Tensor, has_lyrics):
+        """
+        gate: [B, T, D]
+
+        Returns:
+            gate_mean: scalar
+            gate_temporal_std: scalar
+        """
+        sample_mask = self._get_has_lyrics_sample_mask(has_lyrics, gate.device)
+        if sample_mask is not None:
+            gate = gate[sample_mask]
+
+        if gate.numel() == 0:
+            zero = torch.zeros((), device=gate.device)
+            return zero, zero
+
+        gate_mean = gate.mean()
+        gate_temporal_std = gate.std(dim=1, unbiased=False).mean()
+        return gate_mean, gate_temporal_std
+
+
+    def _collect_attn_stats(self, attn_weights: torch.Tensor, key_padding_mask: torch.Tensor, has_lyrics):
+        """
+        attn_weights: [B, H, T, K]
+        key_padding_mask: [B, K], False=valid, True=pad
+
+        Returns:
+            attn_entropy: scalar
+                normalized entropy in [0, 1] approximately
+                higher => flatter attention
+                lower  => sharper attention
+            attn_max: scalar
+                top-1 attention weight mean
+        """
+        sample_mask = self._get_has_lyrics_sample_mask(has_lyrics, attn_weights.device)
+        if sample_mask is not None:
+            attn_weights = attn_weights[sample_mask]
+            key_padding_mask = key_padding_mask[sample_mask]
+
+        if attn_weights.numel() == 0:
+            zero = torch.zeros((), device=attn_weights.device)
+            return zero, zero
+
+        probs = attn_weights.clamp_min(1e-8)  # [B, H, T, K]
+        entropy = -(probs * probs.log()).sum(dim=-1)  # [B, H, T]
+
+        valid_counts = (~key_padding_mask).sum(dim=1).float()  # [B]
+        denom = torch.log(valid_counts.clamp(min=2)).view(-1, 1, 1)
+        entropy_norm = torch.where(
+            valid_counts.view(-1, 1, 1) > 1,
+            entropy / denom.clamp_min(1e-8),
+            torch.zeros_like(entropy),
+        )
+
+        attn_max = attn_weights.max(dim=-1).values  # [B, H, T]
+
+        return entropy_norm.mean(), attn_max.mean()
+
+
     # =========================
     # [ADDED FOR LYRICS]
-    # Fuse optional song-level lyrics embedding into the sequence.
-    # If has_lyrics == 0, the projected lyrics condition is fully zeroed out,
-    # so samples without lyrics will not inject bias into training.
+    # dual-path lyrics cross-attention with gate:
+    #   audio tokens as query
+    #   line / stanza embeddings as key/value
+    #   lyrics_context = 0.5 * line_context + 0.5 * stanza_context
+    #   x = x + gate * lyrics_context
     # =========================
-    def fuse_lyrics_condition(self, x, lyrics_embeddings=None, has_lyrics=None):
+    def fuse_lyrics_condition(
+        self,
+        x,
+        lyrics_line_embeddings=None,
+        lyrics_stanza_embeddings=None,
+        lyrics_line_masks=None,
+        lyrics_stanza_masks=None,
+        has_lyrics=None,
+    ):
         """
         Args:
             x: [B, T, D]
-            lyrics_embeddings:
-                - old mode: [B, lyrics_input_dim]
-                - new mode: [B, T, lyrics_input_dim]
-            has_lyrics: [B] or [B, 1], 1 means valid lyrics embedding exists
+            lyrics_line_embeddings: [B, L, lyrics_input_dim]
+            lyrics_stanza_embeddings: [B, S, lyrics_input_dim]
+            lyrics_line_masks: [B, L], False=valid, True=pad
+            lyrics_stanza_masks: [B, S], False=valid, True=pad
+            has_lyrics: [B] or [B, 1]
         """
-        if (not self.use_lyrics) or (lyrics_embeddings is None):
+        # reset debug cache for this forward
+        self.latest_lyrics_debug = {}
+
+        if (not self.use_lyrics) or (lyrics_line_embeddings is None) or (lyrics_stanza_embeddings is None):
             return x
 
-        if not isinstance(lyrics_embeddings, torch.Tensor):
-            lyrics_embeddings = torch.tensor(lyrics_embeddings, device=x.device)
+        if not isinstance(lyrics_line_embeddings, torch.Tensor):
+            lyrics_line_embeddings = torch.tensor(lyrics_line_embeddings, device=x.device)
+        if not isinstance(lyrics_stanza_embeddings, torch.Tensor):
+            lyrics_stanza_embeddings = torch.tensor(lyrics_stanza_embeddings, device=x.device)
 
-        lyrics_embeddings = lyrics_embeddings.to(x.device).float()
+        lyrics_line_embeddings = lyrics_line_embeddings.to(x.device).float()
+        lyrics_stanza_embeddings = lyrics_stanza_embeddings.to(x.device).float()
 
-        # backward compatibility:
-        # old song-level vector [B, D] -> expand to [B, T, D]
-        if lyrics_embeddings.dim() == 2:
-            lyrics_embeddings = lyrics_embeddings.unsqueeze(1).expand(-1, x.size(1), -1)
-
-        # expected new mode: [B, T, lyrics_input_dim]
-        if lyrics_embeddings.dim() != 3:
-            raise ValueError(
-                f"lyrics_embeddings must be 2D or 3D, got shape={lyrics_embeddings.shape}"
+        if lyrics_line_masks is None:
+            lyrics_line_masks = torch.zeros(
+                lyrics_line_embeddings.size(0),
+                lyrics_line_embeddings.size(1),
+                device=x.device,
+                dtype=torch.bool,
             )
+        else:
+            if not isinstance(lyrics_line_masks, torch.Tensor):
+                lyrics_line_masks = torch.tensor(lyrics_line_masks, device=x.device)
+            lyrics_line_masks = lyrics_line_masks.to(x.device).bool()
 
-        lyrics_cond = self.lyrics_proj(lyrics_embeddings)  # [B, T, D]
+        if lyrics_stanza_masks is None:
+            lyrics_stanza_masks = torch.zeros(
+                lyrics_stanza_embeddings.size(0),
+                lyrics_stanza_embeddings.size(1),
+                device=x.device,
+                dtype=torch.bool,
+            )
+        else:
+            if not isinstance(lyrics_stanza_masks, torch.Tensor):
+                lyrics_stanza_masks = torch.tensor(lyrics_stanza_masks, device=x.device)
+            lyrics_stanza_masks = lyrics_stanza_masks.to(x.device).bool()
+
+        line_memory = self.line_lyrics_proj(lyrics_line_embeddings)         # [B, L, D]
+        stanza_memory = self.stanza_lyrics_proj(lyrics_stanza_embeddings)   # [B, S, D]
+
+        line_context, line_attn_weights = self.line_cross_attn(
+            query=x,
+            key=line_memory,
+            value=line_memory,
+            key_padding_mask=lyrics_line_masks,
+            need_weights=True,
+            average_attn_weights=False,
+        )  # line_attn_weights: [B, H, T, L]
+
+        stanza_context, stanza_attn_weights = self.stanza_cross_attn(
+            query=x,
+            key=stanza_memory,
+            value=stanza_memory,
+            key_padding_mask=lyrics_stanza_masks,
+            need_weights=True,
+            average_attn_weights=False,
+        )  # stanza_attn_weights: [B, H, T, S]
+
+        lyrics_context = 0.5 * line_context + 0.5 * stanza_context
+
+        if self.lyrics_gate is not None:
+            gate = torch.sigmoid(self.lyrics_gate(torch.cat([x, lyrics_context], dim=-1)))
+        else:
+            gate = torch.ones_like(lyrics_context)
+
+        lyrics_context = lyrics_context * gate
+
+        # collect debug stats BEFORE applying has_lyrics broadcast mask
+        gate_mean, gate_temporal_std = self._collect_gate_stats(gate, has_lyrics)
+        line_attn_entropy, line_attn_max = self._collect_attn_stats(
+            line_attn_weights, lyrics_line_masks, has_lyrics
+        )
+        stanza_attn_entropy, stanza_attn_max = self._collect_attn_stats(
+            stanza_attn_weights, lyrics_stanza_masks, has_lyrics
+        )
+
+        self.latest_lyrics_debug = {
+            "lyrics_gate_mean": gate_mean.detach(),
+            "lyrics_gate_temporal_std": gate_temporal_std.detach(),
+            "lyrics_line_attn_entropy": line_attn_entropy.detach(),
+            "lyrics_line_attn_max": line_attn_max.detach(),
+            "lyrics_stanza_attn_entropy": stanza_attn_entropy.detach(),
+            "lyrics_stanza_attn_max": stanza_attn_max.detach(),
+        }
 
         if has_lyrics is None:
-            has_lyrics = torch.zeros(
-                lyrics_cond.size(0),
+            has_lyrics = torch.ones(
+                lyrics_context.size(0),
                 1,
                 1,
                 device=x.device,
-                dtype=lyrics_cond.dtype,
+                dtype=lyrics_context.dtype,
             )
         else:
             if not isinstance(has_lyrics, torch.Tensor):
                 has_lyrics = torch.tensor(has_lyrics, device=x.device)
             has_lyrics = has_lyrics.to(x.device).float().view(-1, 1, 1)
 
-        # mask AFTER projection so projection bias is also removed
-        lyrics_cond = lyrics_cond * has_lyrics
-
-        return self.AddFuse(x=x, cond=lyrics_cond)
+        lyrics_context = lyrics_context * has_lyrics
+        return self.AddFuse(x=x, cond=lyrics_context)
 
     def infer_with_metrics(self, batch, prefix: str = None):
         with torch.no_grad():
@@ -466,6 +653,14 @@ class Model(nn.Module):
             "Su": results["Su"],
             "acc": self.cal_acc(ann_info=gt_info, est_info=msa_info),
         }
+
+        # =========================
+        # [ADDED FOR DEBUG]
+        # surface lyrics debug stats during eval
+        # =========================
+        for k, v in self.latest_lyrics_debug.items():
+            ret_results[k] = v.item()
+
         if prefix:
             ret_results = prefix_dict(ret_results, prefix)
 
@@ -476,8 +671,11 @@ class Model(nn.Module):
         input_embeddings,
         dataset_ids,
         label_id_masks,
-        lyrics_embeddings=None,   # [ADDED FOR LYRICS]
-        has_lyrics=None,          # [ADDED FOR LYRICS]
+        lyrics_line_embeddings=None,      # [ADDED FOR LYRICS]
+        lyrics_stanza_embeddings=None,    # [ADDED FOR LYRICS]
+        lyrics_line_masks=None,           # [ADDED FOR LYRICS]
+        lyrics_stanza_masks=None,         # [ADDED FOR LYRICS]
+        has_lyrics=None,                  # [ADDED FOR LYRICS]
         prefix: str = None,
         with_logits=False,
     ):
@@ -496,7 +694,10 @@ class Model(nn.Module):
             # [ADDED FOR LYRICS]
             logits = self.fuse_lyrics_condition(
                 x=logits,
-                lyrics_embeddings=lyrics_embeddings,
+                lyrics_line_embeddings=lyrics_line_embeddings,
+                lyrics_stanza_embeddings=lyrics_stanza_embeddings,
+                lyrics_line_masks=lyrics_line_masks,
+                lyrics_stanza_masks=lyrics_stanza_masks,
                 has_lyrics=has_lyrics,
             )
 
@@ -576,6 +777,14 @@ class Model(nn.Module):
             loss_section=loss_section,
             loss_function=loss_function,
         )
+
+        # =========================
+        # [ADDED FOR DEBUG]
+        # expose lyrics debug stats into losses dict
+        # =========================
+        if self.latest_lyrics_debug:
+            losses.update(self.latest_lyrics_debug)
+
         if prefix:
             losses = prefix_dict(losses, prefix)
         return losses
@@ -593,7 +802,10 @@ class Model(nn.Module):
         # [ADDED FOR LYRICS]
         logits = self.fuse_lyrics_condition(
             x=logits,
-            lyrics_embeddings=batch.get("lyrics_embeddings", None),
+            lyrics_line_embeddings=batch.get("lyrics_line_embeddings", None),
+            lyrics_stanza_embeddings=batch.get("lyrics_stanza_embeddings", None),
+            lyrics_line_masks=batch.get("lyrics_line_masks", None),
+            lyrics_stanza_masks=batch.get("lyrics_stanza_masks", None),
             has_lyrics=batch.get("has_lyrics", None),
         )
 

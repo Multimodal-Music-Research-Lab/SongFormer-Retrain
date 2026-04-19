@@ -3,6 +3,7 @@ import copy
 import importlib
 import os
 import traceback
+import json
 
 # monkey patch to fix issues in msaf
 import scipy
@@ -241,6 +242,27 @@ def prefix_dict(d, prefix: str):
     return {prefix + key: value for key, value in d.items()}
 
 
+def sanitize_log_dict(d: dict):
+    def _to_scalar(v):
+        if isinstance(v, torch.Tensor):
+            if v.numel() == 1:
+                return float(v.detach().cpu().item())
+            return float(v.detach().cpu().mean().item())
+        if isinstance(v, np.generic):
+            return v.item()
+        if isinstance(v, (float, int, str, bool)):
+            return v
+        return str(v)
+
+    return {k: _to_scalar(v) for k, v in d.items()}
+
+
+def append_jsonl(path: str, record: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(sanitize_log_dict(record), ensure_ascii=False) + "\n")
+
+
 def main(args, hparams):
     assert hasattr(args, "init_seed"), "hparams should have seed attribute"
     set_seed(args.init_seed)
@@ -339,6 +361,10 @@ def main(args, hparams):
         keep_training=True,
         strict=True,
     )
+
+    training_metrics_jsonl = os.path.join(args.checkpoint_dir, "training_metrics.jsonl")
+    eval_metrics_jsonl = os.path.join(args.checkpoint_dir, "eval_metrics.jsonl")
+
     print_rank_0(
         f"-------------------------Parameters: {num_params}-----------------------"
     )
@@ -418,26 +444,47 @@ def main(args, hparams):
                             )
 
                         if global_step % args.log_interval == 0 and rank == 0:
+                            train_log_dict = {
+                                **balancer.metrics,
+                                "training/epoch": epoch,
+                                "training/loss_awl": loss_sum.item(),
+                                "training/loss_function": losses["loss_function"].item(),
+                                "training/loss_section": losses["loss_section"].item(),
+                                "training/learning_rate": scheduler.get_lr()[0],
+                                "training/batch_size": int(hparams.train_dataloader.batch_size),
+                                "training/local_sgd_steps": LOCAL_SGD_STEPS,
+                                "training/num_of_gpu": accelerator.num_processes,
+                            }
+
+                            # =========================
+                            # [ADDED FOR DEBUG]
+                            # log lyrics debug stats if present
+                            # =========================
+                            debug_keys = [
+                                "lyrics_gate_mean",
+                                "lyrics_gate_temporal_std",
+                                "lyrics_line_attn_entropy",
+                                "lyrics_line_attn_max",
+                                "lyrics_stanza_attn_entropy",
+                                "lyrics_stanza_attn_max",
+                            ]
+                            for k in debug_keys:
+                                if k in losses:
+                                    train_log_dict[f"training/{k}"] = losses[k]
+
+                            train_log_dict = sanitize_log_dict(train_log_dict)
+
                             accelerator.log(
-                                {
-                                    **balancer.metrics,
-                                    "training/epoch": epoch,
-                                    # "training/loss": loss.item(),
-                                    "training/loss_awl": loss_sum.item(),
-                                    "training/loss_function": losses[
-                                        "loss_function"
-                                    ].item(),
-                                    "training/loss_section": losses[
-                                        "loss_section"
-                                    ].item(),
-                                    "training/learning_rate": scheduler.get_lr()[0],
-                                    "training/batch_size": int(
-                                        hparams.train_dataloader.batch_size
-                                    ),
-                                    "training/local_sgd_steps": LOCAL_SGD_STEPS,
-                                    "training/num_of_gpu": accelerator.num_processes,
-                                },
+                                train_log_dict,
                                 step=global_step,
+                            )
+
+                            append_jsonl(
+                                training_metrics_jsonl,
+                                {
+                                    "step": global_step,
+                                    **train_log_dict,
+                                },
                             )
                         if (
                             accelerator.sync_gradients
@@ -455,9 +502,19 @@ def main(args, hparams):
                                 )
 
                                 eval_res = prefix_dict(d=eval_res, prefix="eval/")
+                                eval_res = sanitize_log_dict(eval_res)
+
                                 accelerator.log(
                                     eval_res,
                                     step=global_step,
+                                )
+
+                                append_jsonl(
+                                    eval_metrics_jsonl,
+                                    {
+                                        "step": global_step,
+                                        **eval_res,
+                                    },
                                 )
 
                                 hr5 = eval_res.get("dataset_5_HitRate_0.5F", 0)
