@@ -33,133 +33,184 @@ class Dataset(Dataset):
         return set(ids)
     # =========================
     # [ADDED FOR LYRICS]
+    # sync-lyrics local units + relative time features
     # =========================
-    def get_zero_lyrics_sequence(self, target_len: int):
-        return np.zeros((target_len, self.lyrics_input_dim), dtype=np.float32)
+    def get_zero_lyrics_units(self):
+        zero_emb = np.zeros((1, self.lyrics_input_dim), dtype=np.float32)
+        zero_time = np.zeros((1, self.lyrics_time_feat_dim), dtype=np.float32)
+        return zero_emb, zero_emb.copy(), zero_time, zero_time.copy()
 
 
-    def _validate_lyrics_vector_dim(self, lyrics_embedding: np.ndarray, lyrics_path: Path):
-        lyrics_embedding = np.asarray(lyrics_embedding, dtype=np.float32).reshape(-1)
-
-        if lyrics_embedding.shape[0] != self.lyrics_input_dim:
+    def _validate_lyrics_units_dim(self, arr: np.ndarray, expected_dim: int, field_name: str, lyrics_path: Path):
+        arr = np.asarray(arr, dtype=np.float32)
+        if arr.ndim != 2:
+            raise ValueError(f"{field_name} ndim mismatch in {lyrics_path}: got {arr.ndim}, expected 2")
+        if arr.shape[1] != expected_dim:
             raise ValueError(
-                f"Lyrics embedding dim mismatch for {lyrics_path}: "
-                f"{lyrics_embedding.shape[0]} vs expected {self.lyrics_input_dim}"
+                f"{field_name} dim mismatch in {lyrics_path}: "
+                f"{arr.shape[1]} vs expected {expected_dim}"
             )
-        return lyrics_embedding
+        return arr
 
 
-    def _validate_lyrics_sequence_dim(self, lyrics_sequence: np.ndarray, lyrics_path: Path):
-        lyrics_sequence = np.asarray(lyrics_sequence, dtype=np.float32)
-
-        if lyrics_sequence.ndim != 2:
-            raise ValueError(
-                f"Lyrics sequence ndim mismatch for {lyrics_path}: "
-                f"{lyrics_sequence.ndim} vs expected 2"
-            )
-        if lyrics_sequence.shape[1] != self.lyrics_input_dim:
-            raise ValueError(
-                f"Lyrics sequence dim mismatch for {lyrics_path}: "
-                f"{lyrics_sequence.shape[1]} vs expected {self.lyrics_input_dim}"
-            )
-        return lyrics_sequence
+    def _validate_time_vector_dim(self, arr: np.ndarray, field_name: str, lyrics_path: Path):
+        arr = np.asarray(arr, dtype=np.float32).reshape(-1)
+        if arr.ndim != 1:
+            raise ValueError(f"{field_name} ndim mismatch in {lyrics_path}: got {arr.ndim}, expected 1")
+        return arr
 
 
-    def _repeat_resize_sequence(self, seq: np.ndarray, target_len: int):
+    def _build_relative_time_features(
+        self,
+        start_secs: np.ndarray,
+        end_secs: np.ndarray,
+        chunk_start_time: float,
+        chunk_end_time: float,
+    ) -> np.ndarray:
         """
-        seq: [N, D]
-        target_len: target temporal length T
+        Build chunk-relative time features for each local lyrics unit.
 
-        Repeat-style resizing:
-        map each target index t to a source index floor(t * N / T)
+        output shape: [N, 6]
+        features:
+            rel_start
+            rel_end
+            rel_center
+            rel_dur
+            overlap_ratio
+            inside_flag
         """
-        seq = np.asarray(seq, dtype=np.float32)
+        start_secs = np.asarray(start_secs, dtype=np.float32).reshape(-1)
+        end_secs = np.asarray(end_secs, dtype=np.float32).reshape(-1)
 
-        if seq.ndim != 2:
-            raise ValueError(f"Expected 2D sequence, got shape={seq.shape}")
-        if seq.shape[1] != self.lyrics_input_dim:
+        chunk_start_time = float(chunk_start_time)
+        chunk_end_time = float(chunk_end_time)
+        chunk_width = max(chunk_end_time - chunk_start_time, 1e-6)
+        chunk_center = 0.5 * (chunk_start_time + chunk_end_time)
+
+        centers = 0.5 * (start_secs + end_secs)
+        durations = np.maximum(end_secs - start_secs, 1e-6)
+
+        overlap = np.maximum(
+            0.0,
+            np.minimum(end_secs, chunk_end_time) - np.maximum(start_secs, chunk_start_time),
+        )
+        overlap_ratio = overlap / durations
+        inside_flag = ((centers >= chunk_start_time) & (centers <= chunk_end_time)).astype(np.float32)
+
+        feats = np.stack(
+            [
+                (start_secs - chunk_start_time) / chunk_width,
+                (end_secs - chunk_start_time) / chunk_width,
+                (centers - chunk_center) / chunk_width,
+                durations / chunk_width,
+                overlap_ratio,
+                inside_flag,
+            ],
+            axis=1,
+        ).astype(np.float32)
+
+        if feats.shape[1] != self.lyrics_time_feat_dim:
             raise ValueError(
-                f"Sequence dim mismatch: {seq.shape[1]} vs expected {self.lyrics_input_dim}"
+                f"lyrics_time_feat_dim mismatch: built {feats.shape[1]}, "
+                f"but expected {self.lyrics_time_feat_dim}"
             )
-        if target_len <= 0:
-            raise ValueError(f"target_len must be positive, got {target_len}")
-
-        src_len = seq.shape[0]
-        if src_len == 0:
-            return self.get_zero_lyrics_sequence(target_len)
-
-        if src_len == target_len:
-            return seq.astype(np.float32)
-
-        indices = np.floor(np.arange(target_len) * src_len / target_len).astype(np.int64)
-        indices = np.clip(indices, 0, src_len - 1)
-        return seq[indices].astype(np.float32)
+        return feats
 
 
-    def _build_lyrics_sequence_from_npz(self, lyrics_npz, lyrics_path: Path, target_len: int):
-        if "line_embs" not in lyrics_npz:
-            raise KeyError(f"'line_embs' not found in {lyrics_path}")
-        if "stanza_embs" not in lyrics_npz:
-            raise KeyError(f"'stanza_embs' not found in {lyrics_path}")
-
-        line_embs = np.asarray(lyrics_npz["line_embs"], dtype=np.float32)
-        stanza_embs = np.asarray(lyrics_npz["stanza_embs"], dtype=np.float32)
-
-        if line_embs.ndim != 2 or line_embs.shape[0] == 0:
-            raise ValueError(f"Invalid 'line_embs' in {lyrics_path}, got shape={line_embs.shape}")
-        if stanza_embs.ndim != 2 or stanza_embs.shape[0] == 0:
-            raise ValueError(f"Invalid 'stanza_embs' in {lyrics_path}, got shape={stanza_embs.shape}")
-
-        line_seq = self._repeat_resize_sequence(line_embs, target_len=target_len)       # [T, D]
-        stanza_seq = self._repeat_resize_sequence(stanza_embs, target_len=target_len)   # [T, D]
-
-        lyrics_sequence = 0.5 * line_seq + 0.5 * stanza_seq
-        return self._validate_lyrics_sequence_dim(lyrics_sequence, lyrics_path)
-
-
-    # =========================
-    # [ADDED FOR LYRICS]
-    # song_id should be the song-level stem, e.g. HX_0001_12step
-    # Returns:
-    #   lyrics_sequence: [T, lyrics_input_dim]
-    #   has_lyrics: bool
-    # Supports both:
-    #   - new .npz structured embedding: line/stanza -> repeat resize -> [T, D]
-    #   - old .npy global embedding: repeat same vector to [T, D]
-    # =========================
-    def try_load_lyrics_sequence(self, internal_tmp_id: str, song_id: str, target_len: int):
+    def try_load_local_lyrics_units(
+        self,
+        internal_tmp_id: str,
+        song_id: str,
+        chunk_start_time: float,
+        chunk_end_time: float,
+    ):
+        """
+        Returns:
+            lyrics_line_embeddings: [L_local, D]
+            lyrics_stanza_embeddings: [S_local, D]
+            lyrics_line_time_features: [L_local, F]
+            lyrics_stanza_time_features: [S_local, F]
+            has_lyrics: bool
+        """
         if not self.use_lyrics:
-            return None, False
+            return None, None, None, None, False
 
         lyrics_dir = self.lyrics_embedding_dir.get(internal_tmp_id, None)
         if lyrics_dir is None or str(lyrics_dir).strip() == "":
-            return self.get_zero_lyrics_sequence(target_len), False
+            zero_line, zero_stanza, zero_line_time, zero_stanza_time = self.get_zero_lyrics_units()
+            return zero_line, zero_stanza, zero_line_time, zero_stanza_time, False
 
         lyrics_dir = Path(lyrics_dir)
         lyrics_npz_path = lyrics_dir / f"{song_id}.npz"
-        lyrics_npy_path = lyrics_dir / f"{song_id}.npy"
 
-        # 1) Prefer new structured npz
-        if lyrics_npz_path.exists():
-            lyrics_npz = np.load(lyrics_npz_path, allow_pickle=False)
-            lyrics_sequence = self._build_lyrics_sequence_from_npz(
-                lyrics_npz=lyrics_npz,
-                lyrics_path=lyrics_npz_path,
-                target_len=target_len,
-            )
-            return lyrics_sequence.astype(np.float32), True
+        if not lyrics_npz_path.exists():
+            zero_line, zero_stanza, zero_line_time, zero_stanza_time = self.get_zero_lyrics_units()
+            return zero_line, zero_stanza, zero_line_time, zero_stanza_time, False
 
-        # 2) Fallback to old single-vector npy
-        if lyrics_npy_path.exists():
-            lyrics_embedding = np.load(lyrics_npy_path, allow_pickle=False)
-            lyrics_embedding = self._validate_lyrics_vector_dim(
-                lyrics_embedding=lyrics_embedding,
-                lyrics_path=lyrics_npy_path,
-            )
-            lyrics_sequence = np.repeat(lyrics_embedding[None, :], target_len, axis=0)
-            return lyrics_sequence.astype(np.float32), True
+        lyrics_npz = np.load(lyrics_npz_path, allow_pickle=False)
 
-        return self.get_zero_lyrics_sequence(target_len), False
+        required_fields = [
+            "line_embs",
+            "line_start_secs",
+            "line_end_secs",
+            "stanza_embs",
+            "stanza_start_secs",
+            "stanza_end_secs",
+        ]
+        for field in required_fields:
+            if field not in lyrics_npz:
+                raise KeyError(f"'{field}' not found in {lyrics_npz_path}")
+
+        line_embs = self._validate_lyrics_units_dim(
+            lyrics_npz["line_embs"], self.lyrics_input_dim, "line_embs", lyrics_npz_path
+        )
+        stanza_embs = self._validate_lyrics_units_dim(
+            lyrics_npz["stanza_embs"], self.lyrics_input_dim, "stanza_embs", lyrics_npz_path
+        )
+
+        line_start_secs = self._validate_time_vector_dim(
+            lyrics_npz["line_start_secs"], "line_start_secs", lyrics_npz_path
+        )
+        line_end_secs = self._validate_time_vector_dim(
+            lyrics_npz["line_end_secs"], "line_end_secs", lyrics_npz_path
+        )
+        stanza_start_secs = self._validate_time_vector_dim(
+            lyrics_npz["stanza_start_secs"], "stanza_start_secs", lyrics_npz_path
+        )
+        stanza_end_secs = self._validate_time_vector_dim(
+            lyrics_npz["stanza_end_secs"], "stanza_end_secs", lyrics_npz_path
+        )
+
+        line_keep = (line_end_secs > chunk_start_time) & (line_start_secs < chunk_end_time)
+        stanza_keep = (stanza_end_secs > chunk_start_time) & (stanza_start_secs < chunk_end_time)
+
+        if line_keep.sum() <= 0 or stanza_keep.sum() <= 0:
+            zero_line, zero_stanza, zero_line_time, zero_stanza_time = self.get_zero_lyrics_units()
+            return zero_line, zero_stanza, zero_line_time, zero_stanza_time, False
+
+        local_line_embs = line_embs[line_keep].astype(np.float32)
+        local_stanza_embs = stanza_embs[stanza_keep].astype(np.float32)
+
+        local_line_time_features = self._build_relative_time_features(
+            start_secs=line_start_secs[line_keep],
+            end_secs=line_end_secs[line_keep],
+            chunk_start_time=chunk_start_time,
+            chunk_end_time=chunk_end_time,
+        )
+        local_stanza_time_features = self._build_relative_time_features(
+            start_secs=stanza_start_secs[stanza_keep],
+            end_secs=stanza_end_secs[stanza_keep],
+            chunk_start_time=chunk_start_time,
+            chunk_end_time=chunk_end_time,
+        )
+
+        return (
+            local_line_embs,
+            local_stanza_embs,
+            local_line_time_features,
+            local_stanza_time_features,
+            True,
+        )
 
     def __init__(
         self,
@@ -186,6 +237,7 @@ class Dataset(Dataset):
         # =========================
         self.use_lyrics = getattr(self.hparams, "use_lyrics", False)
         self.lyrics_input_dim = getattr(self.hparams, "lyrics_input_dim", 1024)
+        self.lyrics_time_feat_dim = getattr(self.hparams, "lyrics_time_feat_dim", 6)
         self.lyrics_embedding_dir = {}
 
         # build dataset-specific label mask
@@ -387,15 +439,23 @@ class Dataset(Dataset):
                 # =========================
                 song_id = "_".join(utt.split("_")[:-1])
 
-                target_len = item_json["mask"].shape[0]
-
-                lyrics_sequence, has_lyrics = self.try_load_lyrics_sequence(
+                (
+                    lyrics_line_embeddings,
+                    lyrics_stanza_embeddings,
+                    lyrics_line_time_features,
+                    lyrics_stanza_time_features,
+                    has_lyrics,
+                ) = self.try_load_local_lyrics_units(
                     internal_tmp_id=internal_tmp_id,
                     song_id=song_id,
-                    target_len=target_len,
+                    chunk_start_time=float(start_time),
+                    chunk_end_time=float(start_time + self.SLICE_DUR),
                 )
 
-                item_json["lyrics_embedding"] = lyrics_sequence   # [T, D]
+                item_json["lyrics_line_embeddings"] = lyrics_line_embeddings
+                item_json["lyrics_stanza_embeddings"] = lyrics_stanza_embeddings
+                item_json["lyrics_line_time_features"] = lyrics_line_time_features
+                item_json["lyrics_stanza_time_features"] = lyrics_stanza_time_features
                 item_json["has_lyrics"] = has_lyrics
 
                 return item_json
@@ -431,17 +491,22 @@ class Dataset(Dataset):
             utt = "_".join(utt.split("_")[:-1])
             end_time = start_time + self.SLICE_DUR
 
-            # downsampled temporal length T used by the model
-            target_len = input_embedding.shape[0] // self.downsample_rates
-
             # =========================
             # [ADDED FOR LYRICS]
             # utt is now song-level id, e.g. HX_0001_12step
+            # only keep line/stanza units overlapping current chunk
             # =========================
-            lyrics_embedding, has_lyrics = self.try_load_lyrics_sequence(
+            (
+                lyrics_line_embeddings,
+                lyrics_stanza_embeddings,
+                lyrics_line_time_features,
+                lyrics_stanza_time_features,
+                has_lyrics,
+            ) = self.try_load_local_lyrics_units(
                 internal_tmp_id=internal_tmp_id,
                 song_id=utt,
-                target_len=target_len,
+                chunk_start_time=float(start_time),
+                chunk_end_time=float(end_time),
             )
 
             local_times = np.array(
@@ -537,8 +602,12 @@ class Dataset(Dataset):
                 ],
                 # =========================
                 # [ADDED FOR LYRICS]
+                # local sync lyrics units + time features
                 # =========================
-                "lyrics_embedding": lyrics_embedding,
+                "lyrics_line_embeddings": lyrics_line_embeddings,
+                "lyrics_stanza_embeddings": lyrics_stanza_embeddings,
+                "lyrics_line_time_features": lyrics_line_time_features,
+                "lyrics_stanza_time_features": lyrics_stanza_time_features,
                 "has_lyrics": has_lyrics,
             }
         except Exception as e:
@@ -585,13 +654,30 @@ class Dataset(Dataset):
             function_mask = np.zeros((len(batch), max_sequence_length), dtype=bool)
             # =========================
             # [ADDED FOR LYRICS]
-            # lyrics is sequence-level, so shape is [B, T, D]
-            # For samples without lyrics, keep zero sequence and has_lyrics = 0
+            # local line/stanza units + time features
+            # masks: False=valid, True=pad
             # =========================
             if self.use_lyrics:
-                lyrics_embeddings = np.zeros(
-                    (len(batch), max_sequence_length, self.lyrics_input_dim), dtype=np.float32
+                max_line_len = max([x["lyrics_line_embeddings"].shape[0] for x in batch])
+                max_stanza_len = max([x["lyrics_stanza_embeddings"].shape[0] for x in batch])
+
+                lyrics_line_embeddings = np.zeros(
+                    (len(batch), max_line_len, self.lyrics_input_dim), dtype=np.float32
                 )
+                lyrics_stanza_embeddings = np.zeros(
+                    (len(batch), max_stanza_len, self.lyrics_input_dim), dtype=np.float32
+                )
+
+                lyrics_line_time_features = np.zeros(
+                    (len(batch), max_line_len, self.lyrics_time_feat_dim), dtype=np.float32
+                )
+                lyrics_stanza_time_features = np.zeros(
+                    (len(batch), max_stanza_len, self.lyrics_time_feat_dim), dtype=np.float32
+                )
+
+                lyrics_line_masks = np.ones((len(batch), max_line_len), dtype=bool)
+                lyrics_stanza_masks = np.ones((len(batch), max_stanza_len), dtype=bool)
+
                 has_lyrics = np.zeros((len(batch),), dtype=np.float32)
             true_function_lists = []
             msa_infos = []
@@ -619,13 +705,25 @@ class Dataset(Dataset):
                 label_id_masks.append(item["label_id_mask"])
                 # =========================
                 # [ADDED FOR LYRICS]
-                # Hook / Private / missing-HX samples will naturally fall back to zero sequence
+                # local line/stanza units + relative time features
                 # =========================
                 if self.use_lyrics:
-                    item_lyrics = item.get("lyrics_embedding", None)
-                    if item_lyrics is not None:
-                        seq_len = min(item_lyrics.shape[0], max_sequence_length)
-                        lyrics_embeddings[idx, :seq_len] = item_lyrics[:seq_len]
+                    item_line_embs = item["lyrics_line_embeddings"]
+                    item_stanza_embs = item["lyrics_stanza_embeddings"]
+                    item_line_time = item["lyrics_line_time_features"]
+                    item_stanza_time = item["lyrics_stanza_time_features"]
+
+                    line_len = item_line_embs.shape[0]
+                    stanza_len = item_stanza_embs.shape[0]
+
+                    lyrics_line_embeddings[idx, :line_len] = item_line_embs
+                    lyrics_stanza_embeddings[idx, :stanza_len] = item_stanza_embs
+                    lyrics_line_time_features[idx, :line_len] = item_line_time
+                    lyrics_stanza_time_features[idx, :stanza_len] = item_stanza_time
+
+                    lyrics_line_masks[idx, :line_len] = False
+                    lyrics_stanza_masks[idx, :stanza_len] = False
+
                     has_lyrics[idx] = float(item.get("has_lyrics", False))
                 if boundary_mask is not None:
                     boundary_mask[idx, : item["mask"].shape[0]] = item.get(
@@ -656,7 +754,12 @@ class Dataset(Dataset):
             # [ADDED FOR LYRICS]
             # =========================
             if self.use_lyrics:
-                lyrics_embeddings = torch.from_numpy(lyrics_embeddings).float()
+                lyrics_line_embeddings = torch.from_numpy(lyrics_line_embeddings).float()
+                lyrics_stanza_embeddings = torch.from_numpy(lyrics_stanza_embeddings).float()
+                lyrics_line_time_features = torch.from_numpy(lyrics_line_time_features).float()
+                lyrics_stanza_time_features = torch.from_numpy(lyrics_stanza_time_features).float()
+                lyrics_line_masks = torch.from_numpy(lyrics_line_masks).bool()
+                lyrics_stanza_masks = torch.from_numpy(lyrics_stanza_masks).bool()
                 has_lyrics = torch.from_numpy(has_lyrics).float()
                 
             return_json = {
@@ -678,7 +781,12 @@ class Dataset(Dataset):
             # [ADDED FOR LYRICS]
             # =========================
             if self.use_lyrics:
-                return_json["lyrics_embeddings"] = lyrics_embeddings
+                return_json["lyrics_line_embeddings"] = lyrics_line_embeddings
+                return_json["lyrics_stanza_embeddings"] = lyrics_stanza_embeddings
+                return_json["lyrics_line_time_features"] = lyrics_line_time_features
+                return_json["lyrics_stanza_time_features"] = lyrics_stanza_time_features
+                return_json["lyrics_line_masks"] = lyrics_line_masks
+                return_json["lyrics_stanza_masks"] = lyrics_stanza_masks
                 return_json["has_lyrics"] = has_lyrics
 
             return return_json

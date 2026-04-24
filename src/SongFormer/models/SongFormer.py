@@ -265,24 +265,88 @@ class Model(nn.Module):
             padding=config.down_sample_conv_padding,
         )
         # =========================
-        # [ADDED FOR LYRICS] optional lyrics conditioning branch
+        # [ADDED FOR LYRICS]
+        # time-aware hierarchical lyrics attention:
+        #   1) line-level cross-attention + line gate
+        #   2) stanza-level cross-attention + stanza gate
+        # no pairwise time bias in this version
         # =========================
         self.use_lyrics = getattr(config, "use_lyrics", False)
         self.lyrics_input_dim = getattr(config, "lyrics_input_dim", 1024)
+        self.lyrics_time_feat_dim = getattr(config, "lyrics_time_feat_dim", 6)
+        self.lyrics_time_hidden_dim = getattr(config, "lyrics_time_hidden_dim", 128)
         self.lyrics_dropout = getattr(config, "lyrics_dropout", 0.1)
+        self.lyrics_attn_num_heads = getattr(
+            config, "lyrics_attn_num_heads", config.transformer_nhead
+        )
+        self.lyrics_attn_dropout = getattr(
+            config, "lyrics_attn_dropout", config.transformer_dropout
+        )
+        self.lyrics_use_gate = getattr(config, "lyrics_use_gate", True)
 
         if self.use_lyrics:
-            self.lyrics_proj = nn.Sequential(
-                nn.Linear(
-                    self.lyrics_input_dim,
-                    config.transformer_encoder_input_dim,
-                ),
+            self.line_text_proj = nn.Sequential(
+                nn.Linear(self.lyrics_input_dim, config.transformer_encoder_input_dim),
                 nn.LayerNorm(config.transformer_encoder_input_dim),
                 nn.GELU(),
                 nn.Dropout(self.lyrics_dropout),
             )
+            self.stanza_text_proj = nn.Sequential(
+                nn.Linear(self.lyrics_input_dim, config.transformer_encoder_input_dim),
+                nn.LayerNorm(config.transformer_encoder_input_dim),
+                nn.GELU(),
+                nn.Dropout(self.lyrics_dropout),
+            )
+
+            self.line_time_proj = nn.Sequential(
+                nn.Linear(self.lyrics_time_feat_dim, self.lyrics_time_hidden_dim),
+                nn.LayerNorm(self.lyrics_time_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(self.lyrics_dropout * 0.5),
+                nn.Linear(self.lyrics_time_hidden_dim, config.transformer_encoder_input_dim),
+            )
+            self.stanza_time_proj = nn.Sequential(
+                nn.Linear(self.lyrics_time_feat_dim, self.lyrics_time_hidden_dim),
+                nn.LayerNorm(self.lyrics_time_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(self.lyrics_dropout * 0.5),
+                nn.Linear(self.lyrics_time_hidden_dim, config.transformer_encoder_input_dim),
+            )
+
+            self.line_cross_attn = nn.MultiheadAttention(
+                embed_dim=config.transformer_encoder_input_dim,
+                num_heads=self.lyrics_attn_num_heads,
+                dropout=self.lyrics_attn_dropout,
+                batch_first=True,
+            )
+            self.stanza_cross_attn = nn.MultiheadAttention(
+                embed_dim=config.transformer_encoder_input_dim,
+                num_heads=self.lyrics_attn_num_heads,
+                dropout=self.lyrics_attn_dropout,
+                batch_first=True,
+            )
+
+            if self.lyrics_use_gate:
+                self.line_gate = nn.Linear(
+                    config.transformer_encoder_input_dim * 2,
+                    config.transformer_encoder_input_dim,
+                )
+                self.stanza_gate = nn.Linear(
+                    config.transformer_encoder_input_dim * 2,
+                    config.transformer_encoder_input_dim,
+                )
+            else:
+                self.line_gate = None
+                self.stanza_gate = None
         else:
-            self.lyrics_proj = None
+            self.line_text_proj = None
+            self.stanza_text_proj = None
+            self.line_time_proj = None
+            self.stanza_time_proj = None
+            self.line_cross_attn = None
+            self.stanza_cross_attn = None
+            self.line_gate = None
+            self.stanza_gate = None
         
         self.AddFuse = AddFuse()
         self.transformer = WrapedTransformerEncoder(
@@ -379,57 +443,140 @@ class Model(nn.Module):
 
     # =========================
     # [ADDED FOR LYRICS]
-    # Fuse optional song-level lyrics embedding into the sequence.
-    # If has_lyrics == 0, the projected lyrics condition is fully zeroed out,
-    # so samples without lyrics will not inject bias into training.
+    # time-aware hierarchical lyrics attention:
+    #   1) line-level cross-attention + line gate
+    #   2) stanza-level cross-attention + stanza gate
+    # no pairwise time bias in this version
     # =========================
-    def fuse_lyrics_condition(self, x, lyrics_embeddings=None, has_lyrics=None):
+    def fuse_lyrics_condition(
+        self,
+        x,
+        lyrics_line_embeddings=None,
+        lyrics_stanza_embeddings=None,
+        lyrics_line_time_features=None,
+        lyrics_stanza_time_features=None,
+        lyrics_line_masks=None,
+        lyrics_stanza_masks=None,
+        has_lyrics=None,
+    ):
         """
         Args:
             x: [B, T, D]
-            lyrics_embeddings:
-                - old mode: [B, lyrics_input_dim]
-                - new mode: [B, T, lyrics_input_dim]
-            has_lyrics: [B] or [B, 1], 1 means valid lyrics embedding exists
+            lyrics_line_embeddings: [B, L, lyrics_input_dim]
+            lyrics_stanza_embeddings: [B, S, lyrics_input_dim]
+            lyrics_line_time_features: [B, L, F]
+            lyrics_stanza_time_features: [B, S, F]
+            lyrics_line_masks: [B, L], False=valid, True=pad
+            lyrics_stanza_masks: [B, S], False=valid, True=pad
+            has_lyrics: [B] or [B, 1]
         """
-        if (not self.use_lyrics) or (lyrics_embeddings is None):
+        if (
+            (not self.use_lyrics)
+            or (lyrics_line_embeddings is None)
+            or (lyrics_stanza_embeddings is None)
+            or (lyrics_line_time_features is None)
+            or (lyrics_stanza_time_features is None)
+        ):
             return x
 
-        if not isinstance(lyrics_embeddings, torch.Tensor):
-            lyrics_embeddings = torch.tensor(lyrics_embeddings, device=x.device)
+        if not isinstance(lyrics_line_embeddings, torch.Tensor):
+            lyrics_line_embeddings = torch.tensor(lyrics_line_embeddings, device=x.device)
+        if not isinstance(lyrics_stanza_embeddings, torch.Tensor):
+            lyrics_stanza_embeddings = torch.tensor(lyrics_stanza_embeddings, device=x.device)
+        if not isinstance(lyrics_line_time_features, torch.Tensor):
+            lyrics_line_time_features = torch.tensor(lyrics_line_time_features, device=x.device)
+        if not isinstance(lyrics_stanza_time_features, torch.Tensor):
+            lyrics_stanza_time_features = torch.tensor(lyrics_stanza_time_features, device=x.device)
 
-        lyrics_embeddings = lyrics_embeddings.to(x.device).float()
+        lyrics_line_embeddings = lyrics_line_embeddings.to(x.device).float()
+        lyrics_stanza_embeddings = lyrics_stanza_embeddings.to(x.device).float()
+        lyrics_line_time_features = lyrics_line_time_features.to(x.device).float()
+        lyrics_stanza_time_features = lyrics_stanza_time_features.to(x.device).float()
 
-        # backward compatibility:
-        # old song-level vector [B, D] -> expand to [B, T, D]
-        if lyrics_embeddings.dim() == 2:
-            lyrics_embeddings = lyrics_embeddings.unsqueeze(1).expand(-1, x.size(1), -1)
-
-        # expected new mode: [B, T, lyrics_input_dim]
-        if lyrics_embeddings.dim() != 3:
-            raise ValueError(
-                f"lyrics_embeddings must be 2D or 3D, got shape={lyrics_embeddings.shape}"
+        if lyrics_line_masks is None:
+            lyrics_line_masks = torch.zeros(
+                lyrics_line_embeddings.size(0),
+                lyrics_line_embeddings.size(1),
+                device=x.device,
+                dtype=torch.bool,
             )
+        else:
+            if not isinstance(lyrics_line_masks, torch.Tensor):
+                lyrics_line_masks = torch.tensor(lyrics_line_masks, device=x.device)
+            lyrics_line_masks = lyrics_line_masks.to(x.device).bool()
 
-        lyrics_cond = self.lyrics_proj(lyrics_embeddings)  # [B, T, D]
+        if lyrics_stanza_masks is None:
+            lyrics_stanza_masks = torch.zeros(
+                lyrics_stanza_embeddings.size(0),
+                lyrics_stanza_embeddings.size(1),
+                device=x.device,
+                dtype=torch.bool,
+            )
+        else:
+            if not isinstance(lyrics_stanza_masks, torch.Tensor):
+                lyrics_stanza_masks = torch.tensor(lyrics_stanza_masks, device=x.device)
+            lyrics_stanza_masks = lyrics_stanza_masks.to(x.device).bool()
 
         if has_lyrics is None:
-            has_lyrics = torch.zeros(
-                lyrics_cond.size(0),
+            has_lyrics = torch.ones(
+                x.size(0),
                 1,
                 1,
                 device=x.device,
-                dtype=lyrics_cond.dtype,
+                dtype=x.dtype,
             )
         else:
             if not isinstance(has_lyrics, torch.Tensor):
                 has_lyrics = torch.tensor(has_lyrics, device=x.device)
             has_lyrics = has_lyrics.to(x.device).float().view(-1, 1, 1)
 
-        # mask AFTER projection so projection bias is also removed
-        lyrics_cond = lyrics_cond * has_lyrics
+        # -------------------------
+        # level 1: line attention
+        # -------------------------
+        line_memory = self.line_text_proj(lyrics_line_embeddings) + self.line_time_proj(
+            lyrics_line_time_features
+        )  # [B, L, D]
 
-        return self.AddFuse(x=x, cond=lyrics_cond)
+        line_context, _ = self.line_cross_attn(
+            query=x,
+            key=line_memory,
+            value=line_memory,
+            key_padding_mask=lyrics_line_masks,
+            need_weights=False,
+        )  # [B, T, D]
+
+        if self.line_gate is not None:
+            line_gate = torch.sigmoid(self.line_gate(torch.cat([x, line_context], dim=-1)))
+        else:
+            line_gate = torch.ones_like(line_context)
+
+        line_context = line_context * line_gate * has_lyrics
+        x = self.AddFuse(x=x, cond=line_context)
+
+        # -------------------------
+        # level 2: stanza attention
+        # -------------------------
+        stanza_memory = self.stanza_text_proj(lyrics_stanza_embeddings) + self.stanza_time_proj(
+            lyrics_stanza_time_features
+        )  # [B, S, D]
+
+        stanza_context, _ = self.stanza_cross_attn(
+            query=x,
+            key=stanza_memory,
+            value=stanza_memory,
+            key_padding_mask=lyrics_stanza_masks,
+            need_weights=False,
+        )  # [B, T, D]
+
+        if self.stanza_gate is not None:
+            stanza_gate = torch.sigmoid(self.stanza_gate(torch.cat([x, stanza_context], dim=-1)))
+        else:
+            stanza_gate = torch.ones_like(stanza_context)
+
+        stanza_context = stanza_context * stanza_gate * has_lyrics
+        x = self.AddFuse(x=x, cond=stanza_context)
+
+        return x
 
     def infer_with_metrics(self, batch, prefix: str = None):
         with torch.no_grad():
@@ -476,8 +623,13 @@ class Model(nn.Module):
         input_embeddings,
         dataset_ids,
         label_id_masks,
-        lyrics_embeddings=None,   # [ADDED FOR LYRICS]
-        has_lyrics=None,          # [ADDED FOR LYRICS]
+        lyrics_line_embeddings=None,          # [ADDED FOR LYRICS]
+        lyrics_stanza_embeddings=None,        # [ADDED FOR LYRICS]
+        lyrics_line_time_features=None,       # [ADDED FOR LYRICS]
+        lyrics_stanza_time_features=None,     # [ADDED FOR LYRICS]
+        lyrics_line_masks=None,               # [ADDED FOR LYRICS]
+        lyrics_stanza_masks=None,             # [ADDED FOR LYRICS]
+        has_lyrics=None,                      # [ADDED FOR LYRICS]
         prefix: str = None,
         with_logits=False,
     ):
@@ -496,7 +648,12 @@ class Model(nn.Module):
             # [ADDED FOR LYRICS]
             logits = self.fuse_lyrics_condition(
                 x=logits,
-                lyrics_embeddings=lyrics_embeddings,
+                lyrics_line_embeddings=lyrics_line_embeddings,
+                lyrics_stanza_embeddings=lyrics_stanza_embeddings,
+                lyrics_line_time_features=lyrics_line_time_features,
+                lyrics_stanza_time_features=lyrics_stanza_time_features,
+                lyrics_line_masks=lyrics_line_masks,
+                lyrics_stanza_masks=lyrics_stanza_masks,
                 has_lyrics=has_lyrics,
             )
 
@@ -593,7 +750,12 @@ class Model(nn.Module):
         # [ADDED FOR LYRICS]
         logits = self.fuse_lyrics_condition(
             x=logits,
-            lyrics_embeddings=batch.get("lyrics_embeddings", None),
+            lyrics_line_embeddings=batch.get("lyrics_line_embeddings", None),
+            lyrics_stanza_embeddings=batch.get("lyrics_stanza_embeddings", None),
+            lyrics_line_time_features=batch.get("lyrics_line_time_features", None),
+            lyrics_stanza_time_features=batch.get("lyrics_stanza_time_features", None),
+            lyrics_line_masks=batch.get("lyrics_line_masks", None),
+            lyrics_stanza_masks=batch.get("lyrics_stanza_masks", None),
             has_lyrics=batch.get("has_lyrics", None),
         )
 
