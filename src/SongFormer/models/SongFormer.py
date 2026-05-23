@@ -266,46 +266,26 @@ class Model(nn.Module):
         )
         # =========================
         # [ADDED FOR LYRICS]
-        # time-aware hierarchical lyrics attention:
-        #   1) line-level cross-attention + line gate
-        #   2) stanza-level cross-attention + stanza gate
-        # no pairwise time bias in this version
+        # line-level frame-aligned lyrics fusion
+        # lyrics_frame_embeddings: [B, T, 1024]
+        # lyrics_frame_time_features: [B, T, 6]
         # =========================
         self.use_lyrics = getattr(config, "use_lyrics", False)
         self.lyrics_input_dim = getattr(config, "lyrics_input_dim", 1024)
         self.lyrics_time_feat_dim = getattr(config, "lyrics_time_feat_dim", 6)
         self.lyrics_time_hidden_dim = getattr(config, "lyrics_time_hidden_dim", 128)
         self.lyrics_dropout = getattr(config, "lyrics_dropout", 0.1)
-        self.lyrics_attn_num_heads = getattr(
-            config, "lyrics_attn_num_heads", config.transformer_nhead
-        )
-        self.lyrics_attn_dropout = getattr(
-            config, "lyrics_attn_dropout", config.transformer_dropout
-        )
         self.lyrics_use_gate = getattr(config, "lyrics_use_gate", True)
 
         if self.use_lyrics:
-            self.line_text_proj = nn.Sequential(
-                nn.Linear(self.lyrics_input_dim, config.transformer_encoder_input_dim),
-                nn.LayerNorm(config.transformer_encoder_input_dim),
-                nn.GELU(),
-                nn.Dropout(self.lyrics_dropout),
-            )
-            self.stanza_text_proj = nn.Sequential(
+            self.lyrics_text_proj = nn.Sequential(
                 nn.Linear(self.lyrics_input_dim, config.transformer_encoder_input_dim),
                 nn.LayerNorm(config.transformer_encoder_input_dim),
                 nn.GELU(),
                 nn.Dropout(self.lyrics_dropout),
             )
 
-            self.line_time_proj = nn.Sequential(
-                nn.Linear(self.lyrics_time_feat_dim, self.lyrics_time_hidden_dim),
-                nn.LayerNorm(self.lyrics_time_hidden_dim),
-                nn.GELU(),
-                nn.Dropout(self.lyrics_dropout * 0.5),
-                nn.Linear(self.lyrics_time_hidden_dim, config.transformer_encoder_input_dim),
-            )
-            self.stanza_time_proj = nn.Sequential(
+            self.lyrics_time_proj = nn.Sequential(
                 nn.Linear(self.lyrics_time_feat_dim, self.lyrics_time_hidden_dim),
                 nn.LayerNorm(self.lyrics_time_hidden_dim),
                 nn.GELU(),
@@ -313,40 +293,28 @@ class Model(nn.Module):
                 nn.Linear(self.lyrics_time_hidden_dim, config.transformer_encoder_input_dim),
             )
 
-            self.line_cross_attn = nn.MultiheadAttention(
-                embed_dim=config.transformer_encoder_input_dim,
-                num_heads=self.lyrics_attn_num_heads,
-                dropout=self.lyrics_attn_dropout,
-                batch_first=True,
-            )
-            self.stanza_cross_attn = nn.MultiheadAttention(
-                embed_dim=config.transformer_encoder_input_dim,
-                num_heads=self.lyrics_attn_num_heads,
-                dropout=self.lyrics_attn_dropout,
-                batch_first=True,
+            self.lyrics_fuse_proj = nn.Sequential(
+                nn.Linear(
+                    config.transformer_encoder_input_dim * 2,
+                    config.transformer_encoder_input_dim,
+                ),
+                nn.LayerNorm(config.transformer_encoder_input_dim),
+                nn.GELU(),
+                nn.Dropout(self.lyrics_dropout),
             )
 
             if self.lyrics_use_gate:
-                self.line_gate = nn.Linear(
-                    config.transformer_encoder_input_dim * 2,
-                    config.transformer_encoder_input_dim,
-                )
-                self.stanza_gate = nn.Linear(
+                self.lyrics_gate = nn.Linear(
                     config.transformer_encoder_input_dim * 2,
                     config.transformer_encoder_input_dim,
                 )
             else:
-                self.line_gate = None
-                self.stanza_gate = None
+                self.lyrics_gate = None
         else:
-            self.line_text_proj = None
-            self.stanza_text_proj = None
-            self.line_time_proj = None
-            self.stanza_time_proj = None
-            self.line_cross_attn = None
-            self.stanza_cross_attn = None
-            self.line_gate = None
-            self.stanza_gate = None
+            self.lyrics_text_proj = None
+            self.lyrics_time_proj = None
+            self.lyrics_fuse_proj = None
+            self.lyrics_gate = None
         
         self.AddFuse = AddFuse()
         self.transformer = WrapedTransformerEncoder(
@@ -443,79 +411,35 @@ class Model(nn.Module):
 
     # =========================
     # [ADDED FOR LYRICS]
-    # time-aware hierarchical lyrics attention:
-    #   1) line-level cross-attention + line gate
-    #   2) stanza-level cross-attention + stanza gate
-    # no pairwise time bias in this version
     # =========================
     def fuse_lyrics_condition(
         self,
         x,
-        lyrics_line_embeddings=None,
-        lyrics_stanza_embeddings=None,
-        lyrics_line_time_features=None,
-        lyrics_stanza_time_features=None,
-        lyrics_line_masks=None,
-        lyrics_stanza_masks=None,
+        lyrics_frame_embeddings=None,
+        lyrics_frame_time_features=None,
         has_lyrics=None,
     ):
         """
         Args:
             x: [B, T, D]
-            lyrics_line_embeddings: [B, L, lyrics_input_dim]
-            lyrics_stanza_embeddings: [B, S, lyrics_input_dim]
-            lyrics_line_time_features: [B, L, F]
-            lyrics_stanza_time_features: [B, S, F]
-            lyrics_line_masks: [B, L], False=valid, True=pad
-            lyrics_stanza_masks: [B, S], False=valid, True=pad
+            lyrics_frame_embeddings: [B, T, lyrics_input_dim]
+            lyrics_frame_time_features: [B, T, lyrics_time_feat_dim]
             has_lyrics: [B] or [B, 1]
         """
         if (
             (not self.use_lyrics)
-            or (lyrics_line_embeddings is None)
-            or (lyrics_stanza_embeddings is None)
-            or (lyrics_line_time_features is None)
-            or (lyrics_stanza_time_features is None)
+            or (lyrics_frame_embeddings is None)
+            or (lyrics_frame_time_features is None)
         ):
             return x
 
-        if not isinstance(lyrics_line_embeddings, torch.Tensor):
-            lyrics_line_embeddings = torch.tensor(lyrics_line_embeddings, device=x.device)
-        if not isinstance(lyrics_stanza_embeddings, torch.Tensor):
-            lyrics_stanza_embeddings = torch.tensor(lyrics_stanza_embeddings, device=x.device)
-        if not isinstance(lyrics_line_time_features, torch.Tensor):
-            lyrics_line_time_features = torch.tensor(lyrics_line_time_features, device=x.device)
-        if not isinstance(lyrics_stanza_time_features, torch.Tensor):
-            lyrics_stanza_time_features = torch.tensor(lyrics_stanza_time_features, device=x.device)
+        if not isinstance(lyrics_frame_embeddings, torch.Tensor):
+            lyrics_frame_embeddings = torch.tensor(lyrics_frame_embeddings, device=x.device)
+        if not isinstance(lyrics_frame_time_features, torch.Tensor):
+            lyrics_frame_time_features = torch.tensor(lyrics_frame_time_features, device=x.device)
 
-        lyrics_line_embeddings = lyrics_line_embeddings.to(x.device).float()
-        lyrics_stanza_embeddings = lyrics_stanza_embeddings.to(x.device).float()
-        lyrics_line_time_features = lyrics_line_time_features.to(x.device).float()
-        lyrics_stanza_time_features = lyrics_stanza_time_features.to(x.device).float()
-
-        if lyrics_line_masks is None:
-            lyrics_line_masks = torch.zeros(
-                lyrics_line_embeddings.size(0),
-                lyrics_line_embeddings.size(1),
-                device=x.device,
-                dtype=torch.bool,
-            )
-        else:
-            if not isinstance(lyrics_line_masks, torch.Tensor):
-                lyrics_line_masks = torch.tensor(lyrics_line_masks, device=x.device)
-            lyrics_line_masks = lyrics_line_masks.to(x.device).bool()
-
-        if lyrics_stanza_masks is None:
-            lyrics_stanza_masks = torch.zeros(
-                lyrics_stanza_embeddings.size(0),
-                lyrics_stanza_embeddings.size(1),
-                device=x.device,
-                dtype=torch.bool,
-            )
-        else:
-            if not isinstance(lyrics_stanza_masks, torch.Tensor):
-                lyrics_stanza_masks = torch.tensor(lyrics_stanza_masks, device=x.device)
-            lyrics_stanza_masks = lyrics_stanza_masks.to(x.device).bool()
+        lyrics_frame_embeddings = lyrics_frame_embeddings.to(x.device).float()
+        lyrics_frame_time_features = lyrics_frame_time_features.to(x.device).float()
 
         if has_lyrics is None:
             has_lyrics = torch.ones(
@@ -530,51 +454,22 @@ class Model(nn.Module):
                 has_lyrics = torch.tensor(has_lyrics, device=x.device)
             has_lyrics = has_lyrics.to(x.device).float().view(-1, 1, 1)
 
-        # -------------------------
-        # level 1: line attention
-        # -------------------------
-        line_memory = self.line_text_proj(lyrics_line_embeddings) + self.line_time_proj(
-            lyrics_line_time_features
-        )  # [B, L, D]
-
-        line_context, _ = self.line_cross_attn(
-            query=x,
-            key=line_memory,
-            value=line_memory,
-            key_padding_mask=lyrics_line_masks,
-            need_weights=False,
+        # line semantic embedding + frame-level time embedding
+        lyric_seq = self.lyrics_text_proj(lyrics_frame_embeddings) + self.lyrics_time_proj(
+            lyrics_frame_time_features
         )  # [B, T, D]
 
-        if self.line_gate is not None:
-            line_gate = torch.sigmoid(self.line_gate(torch.cat([x, line_context], dim=-1)))
+        # direct fusion
+        fuse_input = torch.cat([x, lyric_seq], dim=-1)  # [B, T, 2D]
+        lyric_delta = self.lyrics_fuse_proj(fuse_input)  # [B, T, D]
+
+        if self.lyrics_gate is not None:
+            gate = torch.sigmoid(self.lyrics_gate(fuse_input))
         else:
-            line_gate = torch.ones_like(line_context)
+            gate = torch.ones_like(lyric_delta)
 
-        line_context = line_context * line_gate * has_lyrics
-        x = self.AddFuse(x=x, cond=line_context)
-
-        # -------------------------
-        # level 2: stanza attention
-        # -------------------------
-        stanza_memory = self.stanza_text_proj(lyrics_stanza_embeddings) + self.stanza_time_proj(
-            lyrics_stanza_time_features
-        )  # [B, S, D]
-
-        stanza_context, _ = self.stanza_cross_attn(
-            query=x,
-            key=stanza_memory,
-            value=stanza_memory,
-            key_padding_mask=lyrics_stanza_masks,
-            need_weights=False,
-        )  # [B, T, D]
-
-        if self.stanza_gate is not None:
-            stanza_gate = torch.sigmoid(self.stanza_gate(torch.cat([x, stanza_context], dim=-1)))
-        else:
-            stanza_gate = torch.ones_like(stanza_context)
-
-        stanza_context = stanza_context * stanza_gate * has_lyrics
-        x = self.AddFuse(x=x, cond=stanza_context)
+        lyric_delta = lyric_delta * gate * has_lyrics
+        x = self.AddFuse(x=x, cond=lyric_delta)
 
         return x
 
@@ -623,44 +518,35 @@ class Model(nn.Module):
         input_embeddings,
         dataset_ids,
         label_id_masks,
-        lyrics_line_embeddings=None,          # [ADDED FOR LYRICS]
-        lyrics_stanza_embeddings=None,        # [ADDED FOR LYRICS]
-        lyrics_line_time_features=None,       # [ADDED FOR LYRICS]
-        lyrics_stanza_time_features=None,     # [ADDED FOR LYRICS]
-        lyrics_line_masks=None,               # [ADDED FOR LYRICS]
-        lyrics_stanza_masks=None,             # [ADDED FOR LYRICS]
-        has_lyrics=None,                      # [ADDED FOR LYRICS]
+        lyrics_frame_embeddings=None,
+        lyrics_frame_time_features=None,
+        has_lyrics=None,
         prefix: str = None,
         with_logits=False,
     ):
         with torch.no_grad():
             input_embeddings = self.mixed_win_downsample(input_embeddings)
             input_embeddings = self.input_norm(input_embeddings)
-            logits = self.down_sample_conv(input_embeddings)
+            x_audio = self.down_sample_conv(input_embeddings)
 
-            # original source token branch (kept for fair comparison)
             dataset_prefix = self.dataset_class_prefix(dataset_ids)
             dataset_prefix_expand = dataset_prefix.unsqueeze(1).expand(
-                logits.size(0), 1, -1
+                x_audio.size(0), 1, -1
             )
-            logits = self.AddFuse(x=logits, cond=dataset_prefix_expand)
+            x_audio = self.AddFuse(x=x_audio, cond=dataset_prefix_expand)
 
-            # [ADDED FOR LYRICS]
-            logits = self.fuse_lyrics_condition(
-                x=logits,
-                lyrics_line_embeddings=lyrics_line_embeddings,
-                lyrics_stanza_embeddings=lyrics_stanza_embeddings,
-                lyrics_line_time_features=lyrics_line_time_features,
-                lyrics_stanza_time_features=lyrics_stanza_time_features,
-                lyrics_line_masks=lyrics_line_masks,
-                lyrics_stanza_masks=lyrics_stanza_masks,
+            x_func = self.fuse_lyrics_condition(
+                x=x_audio,
+                lyrics_frame_embeddings=lyrics_frame_embeddings,
+                lyrics_frame_time_features=lyrics_frame_time_features,
                 has_lyrics=has_lyrics,
             )
 
-            logits = self.transformer(x=logits, src_key_padding_mask=None)
+            x_audio = self.transformer(x=x_audio, src_key_padding_mask=None)
+            x_func = self.transformer(x=x_func, src_key_padding_mask=None)
 
-            function_logits = self.function_head(logits)
-            boundary_logits = self.boundary_head(logits).squeeze(-1)
+            function_logits = self.function_head(x_func)
+            boundary_logits = self.boundary_head(x_audio).squeeze(-1)
 
             logits = {
                 "function_logits": function_logits,
@@ -741,29 +627,26 @@ class Model(nn.Module):
         input_embeddings = batch["input_embeddings"]
         input_embeddings = self.mixed_win_downsample(input_embeddings)
         input_embeddings = self.input_norm(input_embeddings)
-        logits = self.down_sample_conv(input_embeddings)
+        x_audio = self.down_sample_conv(input_embeddings)
 
-        # original source token branch (kept for fair comparison)
         dataset_prefix = self.dataset_class_prefix(batch["dataset_ids"])
-        logits = self.AddFuse(x=logits, cond=dataset_prefix.unsqueeze(1))
+        x_audio = self.AddFuse(x=x_audio, cond=dataset_prefix.unsqueeze(1))
 
-        # [ADDED FOR LYRICS]
-        logits = self.fuse_lyrics_condition(
-            x=logits,
-            lyrics_line_embeddings=batch.get("lyrics_line_embeddings", None),
-            lyrics_stanza_embeddings=batch.get("lyrics_stanza_embeddings", None),
-            lyrics_line_time_features=batch.get("lyrics_line_time_features", None),
-            lyrics_stanza_time_features=batch.get("lyrics_stanza_time_features", None),
-            lyrics_line_masks=batch.get("lyrics_line_masks", None),
-            lyrics_stanza_masks=batch.get("lyrics_stanza_masks", None),
+        # only function head
+        x_func = self.fuse_lyrics_condition(
+            x=x_audio,
+            lyrics_frame_embeddings=batch.get("lyrics_frame_embeddings", None),
+            lyrics_frame_time_features=batch.get("lyrics_frame_time_features", None),
             has_lyrics=batch.get("has_lyrics", None),
         )
 
         src_key_padding_mask = batch["masks"]
-        logits = self.transformer(x=logits, src_key_padding_mask=src_key_padding_mask)
 
-        function_logits = self.function_head(logits)
-        boundary_logits = self.boundary_head(logits).squeeze(-1)
+        x_audio = self.transformer(x=x_audio, src_key_padding_mask=src_key_padding_mask)
+        x_func = self.transformer(x=x_func, src_key_padding_mask=src_key_padding_mask)
+
+        function_logits = self.function_head(x_func)
+        boundary_logits = self.boundary_head(x_audio).squeeze(-1)
 
         logits = {
             "function_logits": function_logits,
