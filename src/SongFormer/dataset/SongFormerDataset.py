@@ -296,6 +296,10 @@ class Dataset(Dataset):
                 )
 
                 item_json["lyrics_embedding"] = lyrics_embedding
+                # Ablation: keep HookTheory lyrics loading, but disable lyrics fusion
+                # so v1-hook can be compared against v1 plain with identical loading code.
+                if adapter_str == "HookTheoryV1Adapter":
+                    has_lyrics = False
                 item_json["has_lyrics"] = has_lyrics
 
                 return item_json
