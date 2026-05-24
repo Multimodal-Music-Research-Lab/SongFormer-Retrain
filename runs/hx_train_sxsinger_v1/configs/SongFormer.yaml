@@ -11,6 +11,7 @@ input_dim: 2048
 # frame-aligned direct fusion
 # ============================
 use_lyrics: true
+force_disable_lyrics_fusion: true
 lyrics_input_dim: 1024
 lyrics_time_feat_dim: 6
 lyrics_time_hidden_dim: 128
@@ -188,11 +189,11 @@ optimizer:
 # ============================
 
 args:
-  run_name: hx_train_sxsinger_v1
+  run_name: hx_train_sxsinger_lyrics_off
   model_name: SongFormer
   save_interval: 800
   eval_interval: 800
-  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_v1/results/train_output
+  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_lyrics_off/results/train_output
   max_epochs: 1000
   max_steps: 12010
   tags: null

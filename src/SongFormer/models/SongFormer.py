@@ -271,6 +271,7 @@ class Model(nn.Module):
         # lyrics_frame_time_features: [B, T, 6]
         # =========================
         self.use_lyrics = getattr(config, "use_lyrics", False)
+        self.force_disable_lyrics_fusion = getattr(config, "force_disable_lyrics_fusion", False)
         self.lyrics_input_dim = getattr(config, "lyrics_input_dim", 1024)
         self.lyrics_time_feat_dim = getattr(config, "lyrics_time_feat_dim", 6)
         self.lyrics_time_hidden_dim = getattr(config, "lyrics_time_hidden_dim", 128)
@@ -428,6 +429,7 @@ class Model(nn.Module):
         """
         if (
             (not self.use_lyrics)
+            or self.force_disable_lyrics_fusion
             or (lyrics_frame_embeddings is None)
             or (lyrics_frame_time_features is None)
         ):
