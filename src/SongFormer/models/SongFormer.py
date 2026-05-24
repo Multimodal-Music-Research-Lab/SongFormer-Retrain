@@ -537,18 +537,17 @@ class Model(nn.Module):
             )
             x_audio = self.AddFuse(x=x_audio, cond=dataset_prefix_expand)
 
-            x_func = self.fuse_lyrics_condition(
+            x = self.fuse_lyrics_condition(
                 x=x_audio,
                 lyrics_frame_embeddings=lyrics_frame_embeddings,
                 lyrics_frame_time_features=lyrics_frame_time_features,
                 has_lyrics=has_lyrics,
             )
 
-            x_audio = self.transformer(x=x_audio, src_key_padding_mask=None)
-            x_func = self.transformer(x=x_func, src_key_padding_mask=None)
+            x = self.transformer(x=x, src_key_padding_mask=None)
 
-            function_logits = self.function_head(x_func)
-            boundary_logits = self.boundary_head(x_audio).squeeze(-1)
+            function_logits = self.function_head(x)
+            boundary_logits = self.boundary_head(x).squeeze(-1)
 
             logits = {
                 "function_logits": function_logits,
@@ -634,8 +633,8 @@ class Model(nn.Module):
         dataset_prefix = self.dataset_class_prefix(batch["dataset_ids"])
         x_audio = self.AddFuse(x=x_audio, cond=dataset_prefix.unsqueeze(1))
 
-        # only function head
-        x_func = self.fuse_lyrics_condition(
+        # Single-path ablation: both heads consume the same transformer states.
+        x = self.fuse_lyrics_condition(
             x=x_audio,
             lyrics_frame_embeddings=batch.get("lyrics_frame_embeddings", None),
             lyrics_frame_time_features=batch.get("lyrics_frame_time_features", None),
@@ -644,11 +643,10 @@ class Model(nn.Module):
 
         src_key_padding_mask = batch["masks"]
 
-        x_audio = self.transformer(x=x_audio, src_key_padding_mask=src_key_padding_mask)
-        x_func = self.transformer(x=x_func, src_key_padding_mask=src_key_padding_mask)
+        x = self.transformer(x=x, src_key_padding_mask=src_key_padding_mask)
 
-        function_logits = self.function_head(x_func)
-        boundary_logits = self.boundary_head(x_audio).squeeze(-1)
+        function_logits = self.function_head(x)
+        boundary_logits = self.boundary_head(x).squeeze(-1)
 
         logits = {
             "function_logits": function_logits,

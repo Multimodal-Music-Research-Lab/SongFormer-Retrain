@@ -189,11 +189,11 @@ optimizer:
 # ============================
 
 args:
-  run_name: hx_train_sxsinger_lyrics_off
+  run_name: hx_train_sxsinger_singlepath_lyrics_off
   model_name: SongFormer
   save_interval: 800
   eval_interval: 800
-  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_lyrics_off/results/train_output
+  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_singlepath_lyrics_off/results/train_output
   max_epochs: 1000
   max_steps: 12010
   tags: null
