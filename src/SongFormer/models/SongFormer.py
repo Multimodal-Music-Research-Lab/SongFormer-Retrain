@@ -281,7 +281,7 @@ class LyricsFunctionAdapter(nn.Module):
         )
         nn.init.zeros_(self.delta_head[-1].weight)
         nn.init.zeros_(self.delta_head[-1].bias)
-        self.logit_scale = nn.Parameter(torch.tensor(float(init_scale)))
+        self.logit_scale = nn.Parameter(torch.tensor([float(init_scale)]))
 
     def _match_time_len(self, x, target_len):
         if x.size(1) == target_len:
