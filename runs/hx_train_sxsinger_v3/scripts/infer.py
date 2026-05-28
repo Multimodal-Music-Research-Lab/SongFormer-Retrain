@@ -213,6 +213,118 @@ def build_local_lyrics_condition(
     return global_emb, local_embeddings, 1.0
 
 
+
+def build_line_time_features(start_secs, end_secs, chunk_start_time, chunk_end_time, feat_dim):
+    start_secs = np.asarray(start_secs, dtype=np.float32).reshape(-1)
+    end_secs = np.asarray(end_secs, dtype=np.float32).reshape(-1)
+    chunk_width = max(float(chunk_end_time) - float(chunk_start_time), 1e-6)
+    chunk_center = 0.5 * (float(chunk_start_time) + float(chunk_end_time))
+    centers = 0.5 * (start_secs + end_secs)
+    durations = np.maximum(end_secs - start_secs, 1e-6)
+    overlap = np.maximum(
+        0.0,
+        np.minimum(end_secs, float(chunk_end_time)) - np.maximum(start_secs, float(chunk_start_time)),
+    )
+    overlap_ratio = overlap / durations
+    inside_flag = ((centers >= float(chunk_start_time)) & (centers <= float(chunk_end_time))).astype(np.float32)
+    prev_gap = np.zeros_like(start_secs, dtype=np.float32)
+    next_gap = np.zeros_like(start_secs, dtype=np.float32)
+    if len(start_secs) > 1:
+        prev_gap[1:] = np.maximum(start_secs[1:] - end_secs[:-1], 0.0)
+        next_gap[:-1] = np.maximum(start_secs[1:] - end_secs[:-1], 0.0)
+    feats = np.stack(
+        [
+            (start_secs - float(chunk_start_time)) / chunk_width,
+            (end_secs - float(chunk_start_time)) / chunk_width,
+            (centers - chunk_center) / chunk_width,
+            durations / chunk_width,
+            overlap_ratio,
+            inside_flag,
+            prev_gap / chunk_width,
+            next_gap / chunk_width,
+        ],
+        axis=1,
+    ).astype(np.float32)
+    if feats.shape[1] != feat_dim:
+        raise ValueError(f"lyrics_time_feat_dim mismatch: built {feats.shape[1]}, expected {feat_dim}")
+    return feats
+
+
+def build_frame_time_features(line_start_secs, line_end_secs, target_len, chunk_start_time, chunk_end_time, feat_dim):
+    target_len = int(target_len)
+    chunk_width = max(float(chunk_end_time) - float(chunk_start_time), 1e-6)
+    frame_dur = chunk_width / max(float(target_len), 1.0)
+    frame_centers = float(chunk_start_time) + (np.arange(target_len, dtype=np.float32) + 0.5) * frame_dur
+    feats = np.zeros((target_len, feat_dim), dtype=np.float32)
+    line_start_secs = np.asarray(line_start_secs, dtype=np.float32).reshape(-1)
+    line_end_secs = np.asarray(line_end_secs, dtype=np.float32).reshape(-1)
+    if len(line_start_secs) == 0:
+        return feats
+    line_centers = 0.5 * (line_start_secs + line_end_secs)
+    for idx, frame_time in enumerate(frame_centers):
+        start_dist = np.min(np.abs(line_start_secs - frame_time)) / chunk_width
+        end_dist = np.min(np.abs(line_end_secs - frame_time)) / chunk_width
+        center_idx = int(np.argmin(np.abs(line_centers - frame_time)))
+        signed_center_dist = (frame_time - line_centers[center_idx]) / chunk_width
+        inside = np.any((line_start_secs <= frame_time) & (frame_time <= line_end_secs))
+        density = np.mean(np.abs(line_centers - frame_time) <= 5.0)
+        nearest_gap = min(start_dist, end_dist)
+        feats[idx] = np.asarray(
+            [start_dist, end_dist, signed_center_dist, float(inside), float(density), nearest_gap],
+            dtype=np.float32,
+        )
+    return feats
+
+
+def build_lyrics_token_condition(
+    lyrics_data,
+    target_len,
+    chunk_start_time,
+    chunk_end_time,
+    lyrics_input_dim,
+    lyrics_time_feat_dim,
+    lyrics_frame_time_feat_dim,
+    lyrics_context_window_sec,
+):
+    zero_line = np.zeros((1, lyrics_input_dim), dtype=np.float32)
+    zero_line_time = np.zeros((1, lyrics_time_feat_dim), dtype=np.float32)
+    zero_line_mask = np.zeros((1,), dtype=bool)
+    zero_frame_time = np.zeros((target_len, lyrics_frame_time_feat_dim), dtype=np.float32)
+    if lyrics_data is None:
+        return zero_line, zero_line_time, zero_line_mask, zero_frame_time, 0.0
+
+    line_embs = lyrics_data["line_embs"].astype(np.float32)
+    line_start_secs = lyrics_data["line_start_secs"].astype(np.float32)
+    line_end_secs = lyrics_data["line_end_secs"].astype(np.float32)
+    context_window = float(lyrics_context_window_sec)
+    keep = (
+        (line_end_secs > float(chunk_start_time) - context_window)
+        & (line_start_secs < float(chunk_end_time) + context_window)
+    )
+    if keep.sum() <= 0:
+        return zero_line, zero_line_time, zero_line_mask, zero_frame_time, 0.0
+
+    local_line_embs = line_embs[keep].astype(np.float32)
+    local_start_secs = line_start_secs[keep].astype(np.float32)
+    local_end_secs = line_end_secs[keep].astype(np.float32)
+    line_time = build_line_time_features(
+        local_start_secs,
+        local_end_secs,
+        chunk_start_time,
+        chunk_end_time,
+        lyrics_time_feat_dim,
+    )
+    frame_time = build_frame_time_features(
+        local_start_secs,
+        local_end_secs,
+        target_len,
+        chunk_start_time,
+        chunk_end_time,
+        lyrics_frame_time_feat_dim,
+    )
+    line_mask = np.zeros((local_line_embs.shape[0],), dtype=bool)
+    return local_line_embs, line_time, line_mask, frame_time, 1.0
+
 def load_checkpoint(checkpoint_path, device=None):
     """Load checkpoint from path (.pt or .safetensors)"""
     if device is None:
@@ -305,8 +417,9 @@ def inference(rank, queue_input: mp.Queue, queue_output: mp.Queue, args):
     # =========================
     use_lyrics = getattr(hp, "use_lyrics", False)
     lyrics_input_dim = getattr(hp, "lyrics_input_dim", None)
-    lyrics_local_window_sec = getattr(hp, "lyrics_local_window_sec", 20.0)
-    lyrics_local_gaussian_sigma_sec = getattr(hp, "lyrics_local_gaussian_sigma_sec", 8.0)
+    lyrics_time_feat_dim = getattr(hp, "lyrics_time_feat_dim", 8)
+    lyrics_frame_time_feat_dim = getattr(hp, "lyrics_frame_time_feat_dim", 6)
+    lyrics_context_window_sec = getattr(hp, "lyrics_context_window_sec", 30.0)
 
     # --- FIX 2: checkpoint path resolution ---
     # allow absolute checkpoint; otherwise resolve to src/SongFormer/ckpts/<name>
@@ -464,11 +577,13 @@ def inference(rank, queue_input: mp.Queue, queue_output: mp.Queue, args):
                     embd = torch.concatenate(all_embds, axis=-1)
 
                     # =========================
-                    # [ADDED FOR LYRICS V2]
-                    # Build function-head-only global and smoothed local lyrics condition.
+                    # [ADDED FOR LYRICS V3]
+                    # Build line-token lyrics conditions and frame timing features.
                     # =========================
-                    lyrics_global_embeddings = None
-                    lyrics_local_embeddings = None
+                    lyrics_line_embeddings = None
+                    lyrics_line_time_features = None
+                    lyrics_line_masks = None
+                    lyrics_frame_time_features = None
                     has_lyrics = None
 
                     if use_lyrics:
@@ -478,35 +593,47 @@ def inference(rank, queue_input: mp.Queue, queue_output: mp.Queue, args):
                             float(audio.shape[-1]) / INPUT_SAMPLING_RATE,
                         )
 
-                        # training-time convention:
-                        # target_len = input_embedding.shape[0] // downsample_rates
                         target_len = embd.shape[1] // hp.downsample_rates
-
-                        lyrics_global_np, lyrics_local_np, has_lyrics_val = build_local_lyrics_condition(
+                        (
+                            lyrics_line_np,
+                            lyrics_line_time_np,
+                            lyrics_line_mask_np,
+                            lyrics_frame_time_np,
+                            has_lyrics_val,
+                        ) = build_lyrics_token_condition(
                             lyrics_data=lyrics_data,
                             target_len=target_len,
                             chunk_start_time=chunk_start_time,
                             chunk_end_time=chunk_end_time,
                             lyrics_input_dim=lyrics_input_dim,
-                            local_window_sec=lyrics_local_window_sec,
-                            local_gaussian_sigma_sec=lyrics_local_gaussian_sigma_sec,
+                            lyrics_time_feat_dim=lyrics_time_feat_dim,
+                            lyrics_frame_time_feat_dim=lyrics_frame_time_feat_dim,
+                            lyrics_context_window_sec=lyrics_context_window_sec,
                         )
 
-                        lyrics_global_embeddings = (
-                            torch.from_numpy(lyrics_global_np)
+                        lyrics_line_embeddings = (
+                            torch.from_numpy(lyrics_line_np)
                             .to(device=device, dtype=torch.float32)
                             .unsqueeze(0)
-                        )  # [1, D]
-
-                        lyrics_local_embeddings = (
-                            torch.from_numpy(lyrics_local_np)
+                        )
+                        lyrics_line_time_features = (
+                            torch.from_numpy(lyrics_line_time_np)
                             .to(device=device, dtype=torch.float32)
                             .unsqueeze(0)
-                        )  # [1, T_down, D]
-
+                        )
+                        lyrics_line_masks = (
+                            torch.from_numpy(lyrics_line_mask_np)
+                            .to(device=device, dtype=torch.bool)
+                            .unsqueeze(0)
+                        )
+                        lyrics_frame_time_features = (
+                            torch.from_numpy(lyrics_frame_time_np)
+                            .to(device=device, dtype=torch.float32)
+                            .unsqueeze(0)
+                        )
                         has_lyrics = torch.tensor(
                             [has_lyrics_val], device=device, dtype=torch.float32
-                        )  # [1]
+                        )
 
                     dataset_label = DATASET_LABEL
                     dataset_ids = torch.Tensor(DATASET_IDS).to(device, dtype=torch.long)
@@ -524,11 +651,13 @@ def inference(rank, queue_input: mp.Queue, queue_output: mp.Queue, args):
                         .unsqueeze(0),
 
                         # =========================
-                        # [ADDED FOR LYRICS V2]
-                        # Function-head-only lyrics conditions.
+                        # [ADDED FOR LYRICS V3]
+                        # Line-token lyrics conditions.
                         # =========================
-                        lyrics_global_embeddings=lyrics_global_embeddings,
-                        lyrics_local_embeddings=lyrics_local_embeddings,
+                        lyrics_line_embeddings=lyrics_line_embeddings,
+                        lyrics_line_time_features=lyrics_line_time_features,
+                        lyrics_line_masks=lyrics_line_masks,
+                        lyrics_frame_time_features=lyrics_frame_time_features,
                         has_lyrics=has_lyrics,
 
                         with_logits=True,
