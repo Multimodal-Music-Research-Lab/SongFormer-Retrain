@@ -624,6 +624,46 @@ class Model(nn.Module):
         )
         return boundary_logits + boundary_delta, function_logits + function_delta
 
+    def infer_with_metrics(self, batch, prefix: str = None):
+        with torch.no_grad():
+            logits = self.forward_func(batch)
+
+            losses = self.compute_losses(logits, batch, prefix=None)
+
+            expanded_mask = batch["label_id_masks"].expand(
+                -1, logits["function_logits"].size(1), -1
+            )
+            logits["function_logits"] = logits["function_logits"].masked_fill(
+                expanded_mask, -float("inf")
+            )
+
+            msa_info = postprocess_functional_structure(
+                logits=logits, config=self.config
+            )
+            gt_info = batch["msa_infos"][0]
+            results = self.cal_metrics(gt_info=gt_info, msa_info=msa_info)
+
+        ret_results = {
+            "loss": losses["loss"].item(),
+            "HitRate_3P": results["HitRate_3P"],
+            "HitRate_3R": results["HitRate_3R"],
+            "HitRate_3F": results["HitRate_3F"],
+            "HitRate_0.5P": results["HitRate_0.5P"],
+            "HitRate_0.5R": results["HitRate_0.5R"],
+            "HitRate_0.5F": results["HitRate_0.5F"],
+            "PWF": results["PWF"],
+            "PWP": results["PWP"],
+            "PWR": results["PWR"],
+            "Sf": results["Sf"],
+            "So": results["So"],
+            "Su": results["Su"],
+            "acc": self.cal_acc(ann_info=gt_info, est_info=msa_info),
+        }
+        if prefix:
+            ret_results = prefix_dict(ret_results, prefix)
+
+        return ret_results
+
     def infer(
         self,
         input_embeddings,
