@@ -246,94 +246,190 @@ class SoftmaxFocalLoss(nn.Module):
 
 
 
-class LyricsFunctionAdapter(nn.Module):
+class LyricsEncoder(nn.Module):
+    def __init__(
+        self,
+        lyrics_input_dim,
+        time_feat_dim,
+        hidden_dim,
+        num_heads,
+        num_layers,
+        dropout=0.1,
+    ):
+        super().__init__()
+        self.text_proj = nn.Sequential(
+            nn.Linear(lyrics_input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.time_proj = nn.Sequential(
+            nn.Linear(time_feat_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim * 4,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
+
+    def forward(self, line_embeddings, line_time_features, line_masks=None):
+        memory = self.text_proj(line_embeddings) + self.time_proj(line_time_features)
+        if line_masks is not None:
+            all_pad = line_masks.all(dim=1)
+            if all_pad.any():
+                line_masks = line_masks.clone()
+                line_masks[all_pad, 0] = False
+        return self.encoder(memory, src_key_padding_mask=line_masks)
+
+
+class LyricsHeadAdapter(nn.Module):
     def __init__(
         self,
         audio_dim,
         lyrics_input_dim,
+        time_feat_dim,
+        frame_time_feat_dim,
         num_classes,
-        hidden_dim=None,
-        adapter_hidden_dim=None,
+        hidden_dim,
+        adapter_hidden_dim,
+        num_heads,
+        num_layers,
         dropout=0.1,
-        init_scale=0.01,
     ):
         super().__init__()
-        hidden_dim = hidden_dim or audio_dim
-        adapter_hidden_dim = adapter_hidden_dim or hidden_dim
-
-        self.song_proj = nn.Sequential(
-            nn.Linear(lyrics_input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
+        self.lyrics_encoder = LyricsEncoder(
+            lyrics_input_dim=lyrics_input_dim,
+            time_feat_dim=time_feat_dim,
+            hidden_dim=hidden_dim,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            dropout=dropout,
+        )
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=audio_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.frame_time_proj = nn.Sequential(
+            nn.Linear(frame_time_feat_dim, audio_dim),
+            nn.LayerNorm(audio_dim),
             nn.GELU(),
             nn.Dropout(dropout),
         )
-        self.local_proj = nn.Sequential(
-            nn.Linear(lyrics_input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
+        fused_dim = audio_dim * 4
+        self.boundary_delta_head = nn.Sequential(
+            nn.Linear(fused_dim, adapter_hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
+            nn.Linear(adapter_hidden_dim, 1),
         )
-        self.delta_head = nn.Sequential(
-            nn.Linear(audio_dim + hidden_dim * 2, adapter_hidden_dim),
+        self.function_delta_head = nn.Sequential(
+            nn.Linear(fused_dim, adapter_hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(adapter_hidden_dim, num_classes),
         )
-        nn.init.zeros_(self.delta_head[-1].weight)
-        nn.init.zeros_(self.delta_head[-1].bias)
-        self.logit_scale = nn.Parameter(torch.tensor([float(init_scale)]))
+        nn.init.zeros_(self.boundary_delta_head[-1].weight)
+        nn.init.zeros_(self.boundary_delta_head[-1].bias)
+        nn.init.zeros_(self.function_delta_head[-1].weight)
+        nn.init.zeros_(self.function_delta_head[-1].bias)
 
-    def _match_time_len(self, x, target_len):
-        if x.size(1) == target_len:
-            return x
-        if x.size(1) > target_len:
-            return x[:, :target_len]
-        pad = x.new_zeros(x.size(0), target_len - x.size(1), x.size(2))
-        return torch.cat([x, pad], dim=1)
+    def _zero_deltas(self, audio_states):
+        batch, time_len, _ = audio_states.shape
+        boundary_out = self.boundary_delta_head[-1].out_features
+        function_out = self.function_delta_head[-1].out_features
+        return (
+            audio_states.new_zeros(batch, time_len, boundary_out).squeeze(-1),
+            audio_states.new_zeros(batch, time_len, function_out),
+        )
 
     def forward(
         self,
         audio_states,
-        lyrics_global_embeddings=None,
-        lyrics_local_embeddings=None,
+        lyrics_line_embeddings=None,
+        lyrics_line_time_features=None,
+        lyrics_line_masks=None,
+        lyrics_frame_time_features=None,
         has_lyrics=None,
     ):
-        batch, time_len, _ = audio_states.shape
-        if lyrics_global_embeddings is None or lyrics_local_embeddings is None:
-            return audio_states.new_zeros(
-                batch, time_len, self.delta_head[-1].out_features
-            )
+        if lyrics_line_embeddings is None or lyrics_line_time_features is None:
+            return self._zero_deltas(audio_states)
 
-        if not isinstance(lyrics_global_embeddings, torch.Tensor):
-            lyrics_global_embeddings = torch.tensor(
-                lyrics_global_embeddings, device=audio_states.device
-            )
-        if not isinstance(lyrics_local_embeddings, torch.Tensor):
-            lyrics_local_embeddings = torch.tensor(
-                lyrics_local_embeddings, device=audio_states.device
-            )
+        if not isinstance(lyrics_line_embeddings, torch.Tensor):
+            lyrics_line_embeddings = torch.tensor(lyrics_line_embeddings, device=audio_states.device)
+        if not isinstance(lyrics_line_time_features, torch.Tensor):
+            lyrics_line_time_features = torch.tensor(lyrics_line_time_features, device=audio_states.device)
+        if lyrics_line_masks is not None and not isinstance(lyrics_line_masks, torch.Tensor):
+            lyrics_line_masks = torch.tensor(lyrics_line_masks, device=audio_states.device)
+        if lyrics_frame_time_features is not None and not isinstance(lyrics_frame_time_features, torch.Tensor):
+            lyrics_frame_time_features = torch.tensor(lyrics_frame_time_features, device=audio_states.device)
 
-        lyrics_global_embeddings = lyrics_global_embeddings.to(
-            audio_states.device
-        ).float()
-        lyrics_local_embeddings = lyrics_local_embeddings.to(audio_states.device).float()
-        lyrics_local_embeddings = self._match_time_len(
-            lyrics_local_embeddings, time_len
+        lyrics_line_embeddings = lyrics_line_embeddings.to(audio_states.device).float()
+        lyrics_line_time_features = lyrics_line_time_features.to(audio_states.device).float()
+        lyrics_line_masks = (
+            lyrics_line_masks.to(audio_states.device).bool()
+            if lyrics_line_masks is not None
+            else torch.zeros(
+                lyrics_line_embeddings.size(0),
+                lyrics_line_embeddings.size(1),
+                device=audio_states.device,
+                dtype=torch.bool,
+            )
         )
 
+        batch, time_len, audio_dim = audio_states.shape
         if has_lyrics is None:
             has_lyrics = audio_states.new_zeros(batch)
         elif not isinstance(has_lyrics, torch.Tensor):
             has_lyrics = torch.tensor(has_lyrics, device=audio_states.device)
         has_lyrics = has_lyrics.to(audio_states.device).float().view(batch, 1, 1)
 
-        song_cond = self.song_proj(lyrics_global_embeddings).unsqueeze(1).expand(
-            -1, time_len, -1
+        lyrics_memory = self.lyrics_encoder(
+            lyrics_line_embeddings,
+            lyrics_line_time_features,
+            lyrics_line_masks,
         )
-        local_cond = self.local_proj(lyrics_local_embeddings)
-        delta_input = torch.cat([audio_states, song_cond, local_cond], dim=-1)
-        delta_logits = self.delta_head(delta_input)
-        return delta_logits * self.logit_scale * has_lyrics
+        lyrics_context, _ = self.cross_attn(
+            query=audio_states,
+            key=lyrics_memory,
+            value=lyrics_memory,
+            key_padding_mask=lyrics_line_masks,
+            need_weights=False,
+        )
+
+        valid = (~lyrics_line_masks).float().unsqueeze(-1)
+        denom = valid.sum(dim=1).clamp_min(1.0)
+        song_context = (lyrics_memory * valid).sum(dim=1) / denom
+        song_context = song_context.unsqueeze(1).expand(-1, time_len, -1)
+
+        if lyrics_frame_time_features is None:
+            frame_context = audio_states.new_zeros(batch, time_len, audio_dim)
+        else:
+            lyrics_frame_time_features = lyrics_frame_time_features.to(audio_states.device).float()
+            if lyrics_frame_time_features.size(1) > time_len:
+                lyrics_frame_time_features = lyrics_frame_time_features[:, :time_len]
+            elif lyrics_frame_time_features.size(1) < time_len:
+                pad = lyrics_frame_time_features.new_zeros(
+                    batch,
+                    time_len - lyrics_frame_time_features.size(1),
+                    lyrics_frame_time_features.size(2),
+                )
+                lyrics_frame_time_features = torch.cat([lyrics_frame_time_features, pad], dim=1)
+            frame_context = self.frame_time_proj(lyrics_frame_time_features)
+
+        fused = torch.cat([audio_states, lyrics_context, frame_context, song_context], dim=-1)
+        boundary_delta = self.boundary_delta_head(fused).squeeze(-1)
+        function_delta = self.function_delta_head(fused)
+        return boundary_delta * has_lyrics.squeeze(-1), function_delta * has_lyrics
 
 
 class Model(nn.Module):
@@ -377,32 +473,42 @@ class Model(nn.Module):
 
         # =========================
         # [ADDED FOR LYRICS V2]
-        # Function-head-only lyrics residual adapter. The base SongFormer
-        # modules above keep the same initialization order as the no-lyrics v3
-        # baseline; the lyrics branch is initialized afterwards.
+        # Lyrics v3: line-token lyrics encoder + residual deltas for both heads.
+        # Base SongFormer modules above keep the same initialization order as the
+        # no-lyrics baseline; the lyrics branch is initialized afterwards.
         # =========================
         self.use_lyrics = getattr(config, "use_lyrics", False)
         self.lyrics_input_dim = getattr(config, "lyrics_input_dim", 1024)
+        self.lyrics_time_feat_dim = getattr(config, "lyrics_time_feat_dim", 8)
+        self.lyrics_frame_time_feat_dim = getattr(config, "lyrics_frame_time_feat_dim", 6)
         self.lyrics_dropout = getattr(config, "lyrics_dropout", 0.1)
         self.lyrics_condition_dropout = getattr(config, "lyrics_condition_dropout", 0.0)
+        self.lyrics_encoder_hidden_dim = getattr(
+            config, "lyrics_encoder_hidden_dim", config.transformer_input_dim
+        )
+        self.lyrics_encoder_layers = getattr(config, "lyrics_encoder_layers", 2)
+        self.lyrics_attn_num_heads = getattr(
+            config, "lyrics_attn_num_heads", config.transformer_nhead
+        )
         self.lyrics_adapter_hidden_dim = getattr(
             config, "lyrics_adapter_hidden_dim", config.transformer_input_dim
         )
-        self.lyrics_delta_init_scale = getattr(config, "lyrics_delta_init_scale", 0.01)
-        self.lyrics_detach_audio = getattr(config, "lyrics_detach_audio", True)
 
         if self.use_lyrics:
-            self.lyrics_function_adapter = LyricsFunctionAdapter(
+            self.lyrics_head_adapter = LyricsHeadAdapter(
                 audio_dim=config.transformer_input_dim,
                 lyrics_input_dim=self.lyrics_input_dim,
+                time_feat_dim=self.lyrics_time_feat_dim,
+                frame_time_feat_dim=self.lyrics_frame_time_feat_dim,
                 num_classes=config.num_classes,
-                hidden_dim=config.transformer_input_dim,
+                hidden_dim=self.lyrics_encoder_hidden_dim,
                 adapter_hidden_dim=self.lyrics_adapter_hidden_dim,
+                num_heads=self.lyrics_attn_num_heads,
+                num_layers=self.lyrics_encoder_layers,
                 dropout=self.lyrics_dropout,
-                init_scale=self.lyrics_delta_init_scale,
             )
         else:
-            self.lyrics_function_adapter = None
+            self.lyrics_head_adapter = None
 
     def cal_metrics(self, gt_info: MsaInfo, msa_info: MsaInfo):
         assert gt_info[-1][1] == "end" and msa_info[-1][1] == "end", (
@@ -480,16 +586,19 @@ class Model(nn.Module):
     # =========================
     # [ADDED FOR LYRICS V2]
     # =========================
-    def apply_lyrics_function_adapter(
+    def apply_lyrics_head_adapter(
         self,
         audio_states,
+        boundary_logits,
         function_logits,
-        lyrics_global_embeddings=None,
-        lyrics_local_embeddings=None,
+        lyrics_line_embeddings=None,
+        lyrics_line_time_features=None,
+        lyrics_line_masks=None,
+        lyrics_frame_time_features=None,
         has_lyrics=None,
     ):
-        if (not self.use_lyrics) or self.lyrics_function_adapter is None:
-            return function_logits
+        if (not self.use_lyrics) or self.lyrics_head_adapter is None:
+            return boundary_logits, function_logits
 
         if has_lyrics is not None and not isinstance(has_lyrics, torch.Tensor):
             has_lyrics = torch.tensor(has_lyrics, device=audio_states.device)
@@ -505,64 +614,25 @@ class Model(nn.Module):
             ).float()
             has_lyrics = has_lyrics * keep
 
-        adapter_audio_states = (
-            audio_states.detach() if self.lyrics_detach_audio else audio_states
-        )
-        lyrics_delta_logits = self.lyrics_function_adapter(
-            audio_states=adapter_audio_states,
-            lyrics_global_embeddings=lyrics_global_embeddings,
-            lyrics_local_embeddings=lyrics_local_embeddings,
+        boundary_delta, function_delta = self.lyrics_head_adapter(
+            audio_states=audio_states,
+            lyrics_line_embeddings=lyrics_line_embeddings,
+            lyrics_line_time_features=lyrics_line_time_features,
+            lyrics_line_masks=lyrics_line_masks,
+            lyrics_frame_time_features=lyrics_frame_time_features,
             has_lyrics=has_lyrics,
         )
-        return function_logits + lyrics_delta_logits
-
-    def infer_with_metrics(self, batch, prefix: str = None):
-        with torch.no_grad():
-            logits = self.forward_func(batch)
-
-            losses = self.compute_losses(logits, batch, prefix=None)
-
-            expanded_mask = batch["label_id_masks"].expand(
-                -1, logits["function_logits"].size(1), -1
-            )
-            logits["function_logits"] = logits["function_logits"].masked_fill(
-                expanded_mask, -float("inf")
-            )
-
-            msa_info = postprocess_functional_structure(
-                logits=logits, config=self.config
-            )
-            gt_info = batch["msa_infos"][0]
-            results = self.cal_metrics(gt_info=gt_info, msa_info=msa_info)
-
-        ret_results = {
-            "loss": losses["loss"].item(),
-            "HitRate_3P": results["HitRate_3P"],
-            "HitRate_3R": results["HitRate_3R"],
-            "HitRate_3F": results["HitRate_3F"],
-            "HitRate_0.5P": results["HitRate_0.5P"],
-            "HitRate_0.5R": results["HitRate_0.5R"],
-            "HitRate_0.5F": results["HitRate_0.5F"],
-            "PWF": results["PWF"],
-            "PWP": results["PWP"],
-            "PWR": results["PWR"],
-            "Sf": results["Sf"],
-            "So": results["So"],
-            "Su": results["Su"],
-            "acc": self.cal_acc(ann_info=gt_info, est_info=msa_info),
-        }
-        if prefix:
-            ret_results = prefix_dict(ret_results, prefix)
-
-        return ret_results
+        return boundary_logits + boundary_delta, function_logits + function_delta
 
     def infer(
         self,
         input_embeddings,
         dataset_ids,
         label_id_masks,
-        lyrics_global_embeddings=None,
-        lyrics_local_embeddings=None,
+        lyrics_line_embeddings=None,
+        lyrics_line_time_features=None,
+        lyrics_line_masks=None,
+        lyrics_frame_time_features=None,
         has_lyrics=None,
         prefix: str = None,
         with_logits=False,
@@ -580,15 +650,18 @@ class Model(nn.Module):
 
             x_audio = self.transformer(x=x_audio, src_key_padding_mask=None)
 
+            boundary_logits = self.boundary_head(x_audio).squeeze(-1)
             function_logits = self.function_head(x_audio)
-            function_logits = self.apply_lyrics_function_adapter(
+            boundary_logits, function_logits = self.apply_lyrics_head_adapter(
                 audio_states=x_audio,
+                boundary_logits=boundary_logits,
                 function_logits=function_logits,
-                lyrics_global_embeddings=lyrics_global_embeddings,
-                lyrics_local_embeddings=lyrics_local_embeddings,
+                lyrics_line_embeddings=lyrics_line_embeddings,
+                lyrics_line_time_features=lyrics_line_time_features,
+                lyrics_line_masks=lyrics_line_masks,
+                lyrics_frame_time_features=lyrics_frame_time_features,
                 has_lyrics=has_lyrics,
             )
-            boundary_logits = self.boundary_head(x_audio).squeeze(-1)
 
             logits = {
                 "function_logits": function_logits,
@@ -677,15 +750,18 @@ class Model(nn.Module):
         src_key_padding_mask = batch["masks"]
         x_audio = self.transformer(x=x_audio, src_key_padding_mask=src_key_padding_mask)
 
+        boundary_logits = self.boundary_head(x_audio).squeeze(-1)
         function_logits = self.function_head(x_audio)
-        function_logits = self.apply_lyrics_function_adapter(
+        boundary_logits, function_logits = self.apply_lyrics_head_adapter(
             audio_states=x_audio,
+            boundary_logits=boundary_logits,
             function_logits=function_logits,
-            lyrics_global_embeddings=batch.get("lyrics_global_embeddings", None),
-            lyrics_local_embeddings=batch.get("lyrics_local_embeddings", None),
+            lyrics_line_embeddings=batch.get("lyrics_line_embeddings", None),
+            lyrics_line_time_features=batch.get("lyrics_line_time_features", None),
+            lyrics_line_masks=batch.get("lyrics_line_masks", None),
+            lyrics_frame_time_features=batch.get("lyrics_frame_time_features", None),
             has_lyrics=batch.get("has_lyrics", None),
         )
-        boundary_logits = self.boundary_head(x_audio).squeeze(-1)
 
         logits = {
             "function_logits": function_logits,
