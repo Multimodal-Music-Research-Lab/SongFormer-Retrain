@@ -1,4 +1,5 @@
 import argparse
+import csv
 import copy
 import importlib
 import os
@@ -241,6 +242,25 @@ def prefix_dict(d, prefix: str):
     return {prefix + key: value for key, value in d.items()}
 
 
+def append_training_loss_log(log_path: str, row: dict):
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    fieldnames = [
+        "step",
+        "epoch",
+        "loss_awl",
+        "loss_total",
+        "loss_section",
+        "loss_function",
+        "learning_rate",
+    ]
+    exists = os.path.exists(log_path) and os.path.getsize(log_path) > 0
+    with open(log_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 def main(args, hparams):
     assert hasattr(args, "init_seed"), "hparams should have seed attribute"
     set_seed(args.init_seed)
@@ -418,6 +438,19 @@ def main(args, hparams):
                             )
 
                         if global_step % args.log_interval == 0 and rank == 0:
+                            learning_rate = scheduler.get_lr()[0]
+                            append_training_loss_log(
+                                os.path.join(args.checkpoint_dir, "training_loss.csv"),
+                                {
+                                    "step": int(global_step),
+                                    "epoch": int(epoch),
+                                    "loss_awl": float(loss_sum.item()),
+                                    "loss_total": float(loss.item()),
+                                    "loss_section": float(losses["loss_section"].item()),
+                                    "loss_function": float(losses["loss_function"].item()),
+                                    "learning_rate": float(learning_rate),
+                                },
+                            )
                             accelerator.log(
                                 {
                                     **balancer.metrics,
@@ -430,7 +463,7 @@ def main(args, hparams):
                                     "training/loss_section": losses[
                                         "loss_section"
                                     ].item(),
-                                    "training/learning_rate": scheduler.get_lr()[0],
+                                    "training/learning_rate": learning_rate,
                                     "training/batch_size": int(
                                         hparams.train_dataloader.batch_size
                                     ),
