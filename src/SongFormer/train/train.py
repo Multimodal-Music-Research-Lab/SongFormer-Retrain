@@ -251,6 +251,14 @@ def append_training_loss_log(log_path: str, row: dict):
         "loss_total",
         "loss_section",
         "loss_function",
+        "loss_alignment",
+        "loss_alignment_weighted",
+        "lyrics_song_coverage",
+        "lyrics_frame_coverage",
+        "boundary_gate_mean",
+        "function_gate_mean",
+        "boundary_delta_abs",
+        "function_delta_abs",
         "learning_rate",
     ]
     exists = os.path.exists(log_path) and os.path.getsize(log_path) > 0
@@ -417,6 +425,7 @@ def main(args, hparams):
                                 list(model.parameters()),
                                 accelerator=accelerator,
                             )
+                            loss_sum += losses["loss_alignment_weighted"]
 
                             accelerator.backward(loss_sum)
 
@@ -448,6 +457,14 @@ def main(args, hparams):
                                     "loss_total": float(loss.item()),
                                     "loss_section": float(losses["loss_section"].item()),
                                     "loss_function": float(losses["loss_function"].item()),
+                                    "loss_alignment": float(losses["loss_alignment"].item()),
+                                    "loss_alignment_weighted": float(losses["loss_alignment_weighted"].item()),
+                                    "lyrics_song_coverage": float(losses.get("lyrics_song_coverage", 0.0)),
+                                    "lyrics_frame_coverage": float(losses.get("lyrics_frame_coverage", 0.0)),
+                                    "boundary_gate_mean": float(losses.get("boundary_gate_mean", 0.0)),
+                                    "function_gate_mean": float(losses.get("function_gate_mean", 0.0)),
+                                    "boundary_delta_abs": float(losses.get("boundary_delta_abs", 0.0)),
+                                    "function_delta_abs": float(losses.get("function_delta_abs", 0.0)),
                                     "learning_rate": float(learning_rate),
                                 },
                             )
@@ -463,6 +480,27 @@ def main(args, hparams):
                                     "training/loss_section": losses[
                                         "loss_section"
                                     ].item(),
+                                    "training/loss_alignment": losses[
+                                        "loss_alignment"
+                                    ].item(),
+                                    "training/lyrics_song_coverage": losses.get(
+                                        "lyrics_song_coverage", 0.0
+                                    ),
+                                    "training/lyrics_frame_coverage": losses.get(
+                                        "lyrics_frame_coverage", 0.0
+                                    ),
+                                    "training/boundary_gate_mean": losses.get(
+                                        "boundary_gate_mean", 0.0
+                                    ),
+                                    "training/function_gate_mean": losses.get(
+                                        "function_gate_mean", 0.0
+                                    ),
+                                    "training/boundary_delta_abs": losses.get(
+                                        "boundary_delta_abs", 0.0
+                                    ),
+                                    "training/function_delta_abs": losses.get(
+                                        "function_delta_abs", 0.0
+                                    ),
                                     "training/learning_rate": learning_rate,
                                     "training/batch_size": int(
                                         hparams.train_dataloader.batch_size
