@@ -44,6 +44,7 @@ class HookTheoryAdapter(DatasetAdapter):
         self.internal_tmp_id = internal_tmp_id
         self.dataset_type = dataset_type
         self.EPS = 1e-6
+        self.ssl_round_decimals = getattr(self.hparams, "ssl_round_decimals", None)
 
         # build dataset-specific label mask
         self.dataset_id2label_mask = {}
@@ -98,6 +99,13 @@ class HookTheoryAdapter(DatasetAdapter):
         ids = os.listdir(dir_path)
         ids = [Path(x).stem for x in ids if x.endswith(".npy")]
         return set(ids)
+
+    def round_ssl_embedding(self, embedding):
+        if self.ssl_round_decimals is None:
+            return embedding
+        return np.round(embedding, decimals=int(self.ssl_round_decimals)).astype(
+            embedding.dtype, copy=False
+        )
 
     def time2frame(self, this_time):
         # convert time (s) to frame index
@@ -274,6 +282,7 @@ class HookTheoryAdapter(DatasetAdapter):
                     f"Embedding directory {embd_dir} does not exist"
                 )
             tmp = np.load(Path(embd_dir) / f"{utt}.npy").squeeze(axis=0)
+            tmp = self.round_ssl_embedding(tmp)
             embd_list.append(tmp)
 
         # Check that max/min length difference across embeddings <= 2

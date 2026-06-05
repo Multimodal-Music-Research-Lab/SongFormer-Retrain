@@ -31,6 +31,14 @@ class Dataset(Dataset):
         ids = [Path(x).stem for x in ids if x.endswith(".npy")]
         return set(ids)
 
+    def round_ssl_embedding(self, embedding):
+        ssl_round_decimals = getattr(self, "ssl_round_decimals", None)
+        if ssl_round_decimals is None:
+            return embedding
+        return np.round(embedding, decimals=int(ssl_round_decimals)).astype(
+            embedding.dtype, copy=False
+        )
+
     def __init__(
         self,
         dataset_abstracts: dict,
@@ -51,6 +59,7 @@ class Dataset(Dataset):
 
         self.input_embedding_dir = {}
         self.EPS = 1e-6
+        self.ssl_round_decimals = getattr(self.hparams, "ssl_round_decimals", None)
 
         # build dataset-specific label mask
         for key, allowed_ids in DATASET_ID_ALLOWED_LABEL_IDS.items():
@@ -237,6 +246,7 @@ class Dataset(Dataset):
                         f"Embedding directory {embd_dir} does not exist"
                     )
                 tmp = np.load(Path(embd_dir) / f"{utt}.npy").squeeze(axis=0)
+                tmp = self.round_ssl_embedding(tmp)
                 embd_list.append(tmp)
 
             # check that max/min length difference across embeddings <= 4

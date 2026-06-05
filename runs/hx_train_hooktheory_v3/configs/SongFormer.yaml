@@ -4,6 +4,7 @@
 
 input_dim_raw: 4096
 input_dim: 2048
+ssl_round_decimals: 6
 
 # Downsampling Module
 down_sample_conv_kernel_size: 3
@@ -106,6 +107,7 @@ train_dataset:
     downsample_rates: ${downsample_rates}
     num_neighbors: ${num_neighbors}
     input_dim: ${input_dim_raw}
+    ssl_round_decimals: ${ssl_round_decimals}
     slice_dur: ${slice_dur}
     num_classes: ${num_classes}
     frame_rates: ${frame_rates}
@@ -129,6 +131,7 @@ eval_dataset:
     downsample_rates: ${downsample_rates}
     num_neighbors: ${num_neighbors}
     input_dim: ${input_dim_raw}
+    ssl_round_decimals: ${ssl_round_decimals}
     slice_dur: ${slice_dur}
     num_classes: ${num_classes}
     frame_rates: ${frame_rates}
@@ -166,11 +169,11 @@ optimizer:
 # ============================
 
 args:
-  run_name: hx_train_hooktheory_v3
+  run_name: hx_train_hooktheory_v3_ssl_round6
   model_name: SongFormer
   save_interval: 800
   eval_interval: 800
-  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results_with_loss/train_output
+  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3_ssl_round6/results/train_output
   max_epochs: 1000
   max_steps: 12010
   tags: null
