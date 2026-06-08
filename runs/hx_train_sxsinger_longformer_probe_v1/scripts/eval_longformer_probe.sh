@@ -10,5 +10,17 @@ conda activate songformer
 
 python src/lyrics_only_longformer/run_lyrics_longformer.py \
   --config runs/hx_train_sxsinger_longformer_probe_v1/configs/lyrics_longformer.yaml \
-  --mode eval \
+  --mode infer_bench \
   --ckpt /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_v1/results/best.pt
+
+cd /home/hbli/songformer/repo/SongFormer/src/SongFormer
+
+python utils/convert_res2msa_txt.py \
+  --input_folder /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_v1/results/bench_pred/hx \
+  --output_folder /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_v1/results/eval/hx/est_txt
+
+python evaluation/eval_infer_results.py \
+  --ann_dir /mnt/ssd/hbli/datasets/songformer/songformbench/data/labels/HarmonixSet/ \
+  --est_dir /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_v1/results/eval/hx/est_txt/ \
+  --output_dir /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_v1/results/eval/hx/metrics/ \
+  --prechorus2what verse

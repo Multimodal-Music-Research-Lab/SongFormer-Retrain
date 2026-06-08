@@ -38,3 +38,12 @@ eval:
   batch_size: 1
   eval_steps: 800
   frame_rate: 8.333
+
+bench:
+  scp_path: /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/hx_bench.scp
+  lyrics_dir: /mnt/ssd/hbli/datasets/songformer/songformbench/data/soulxsinger_lyrics/HarmonixSet
+  ann_dir: /mnt/ssd/hbli/datasets/songformer/songformbench/data/labels/HarmonixSet
+  pred_json_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_v1/results/bench_pred/hx
+  est_txt_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_v1/results/eval/hx/est_txt
+  metrics_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_v1/results/eval/hx/metrics
+  min_segment_dur: 0.25

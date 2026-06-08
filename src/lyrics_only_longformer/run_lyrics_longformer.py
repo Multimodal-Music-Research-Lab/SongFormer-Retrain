@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import yaml
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warmup
@@ -20,6 +20,7 @@ from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warm
 
 LABELS = ["intro", "verse", "chorus", "bridge", "inst", "outro", "pre-chorus", "silence"]
 LABEL_TO_ID = {x: i for i, x in enumerate(LABELS)}
+ID_TO_LABEL = {i: x for x, i in LABEL_TO_ID.items()}
 
 
 def normalize_label(label: str) -> str:
@@ -40,6 +41,36 @@ def normalize_label(label: str) -> str:
 
 def read_ids(path: str) -> List[str]:
     return [x.strip() for x in Path(path).read_text().splitlines() if x.strip()]
+
+
+def read_scp_ids(path: str) -> List[str]:
+    return [Path(x).stem for x in read_ids(path)]
+
+
+def load_msa_txt(path: Path) -> List[Tuple[float, float, str]]:
+    entries = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) != 2:
+            continue
+        entries.append((float(parts[0]), normalize_label(parts[1])))
+    intervals = []
+    for i, (start, label) in enumerate(entries):
+        end = entries[i + 1][0] if i + 1 < len(entries) else start
+        if label == "end":
+            continue
+        if end > start:
+            intervals.append((start, end, label))
+    return intervals
+
+
+def load_bench_labels(ann_dir: str) -> Dict[str, List[Tuple[float, float, str]]]:
+    out = {}
+    for path in Path(ann_dir).glob("*.txt"):
+        out[path.stem] = load_msa_txt(path)
+    return out
 
 
 def load_hx_labels(path: str) -> Dict[str, List[Tuple[float, float, str]]]:
@@ -265,6 +296,73 @@ def load_examples(cfg: Dict, split: str) -> List[SongExample]:
                 if lines:
                     examples.append(SongExample(song_id, lines, hook_labels[song_id], "hook"))
     return examples
+
+
+def load_bench_examples(cfg: Dict) -> List[SongExample]:
+    data_cfg = cfg["bench"]
+    bench_labels = load_bench_labels(data_cfg["ann_dir"])
+    examples = []
+    for song_id in read_scp_ids(data_cfg["scp_path"]):
+        lyric_path = Path(data_cfg["lyrics_dir"]) / f"{song_id}.json"
+        if lyric_path.exists() and song_id in bench_labels:
+            lines = flatten_soulx_lines(lyric_path)
+            if lines:
+                examples.append(SongExample(song_id, lines, bench_labels[song_id], "bench"))
+    return examples
+
+
+def intervals_duration(intervals: List[Tuple[float, float, str]], fallback: float = 1.0) -> float:
+    return max([end for _, end, _ in intervals] + [fallback])
+
+
+def line_predictions_to_segments(
+    pred_labels: np.ndarray,
+    starts: np.ndarray,
+    ends: np.ndarray,
+    duration: float,
+    min_segment_dur: float = 0.25,
+) -> List[Dict]:
+    if len(pred_labels) == 0:
+        return [{"start": 0.0, "end": float(duration), "label": "silence"}]
+
+    events = []
+    first_start = max(0.0, float(starts[0]))
+    events.append((0.0, ID_TO_LABEL[int(pred_labels[0])]))
+    if first_start > 0:
+        events.append((first_start, ID_TO_LABEL[int(pred_labels[0])]))
+    for i, label_id in enumerate(pred_labels):
+        events.append((max(0.0, float(starts[i])), ID_TO_LABEL[int(label_id)]))
+        if i + 1 < len(pred_labels) and ends[i] < starts[i + 1]:
+            events.append((max(0.0, float(ends[i])), ID_TO_LABEL[int(label_id)]))
+
+    events = sorted(events, key=lambda x: x[0])
+    merged_events = []
+    for t, lab in events:
+        t = min(max(0.0, t), float(duration))
+        if not merged_events:
+            merged_events.append((t, lab))
+        elif lab != merged_events[-1][1]:
+            if t > merged_events[-1][0]:
+                merged_events.append((t, lab))
+            else:
+                merged_events[-1] = (merged_events[-1][0], lab)
+
+    segments = []
+    for i, (start, lab) in enumerate(merged_events):
+        end = merged_events[i + 1][0] if i + 1 < len(merged_events) else float(duration)
+        if end - start < min_segment_dur:
+            continue
+        if segments and segments[-1]["label"] == lab:
+            segments[-1]["end"] = end
+        else:
+            segments.append({"start": float(start), "end": float(end), "label": lab})
+
+    if not segments:
+        return [{"start": 0.0, "end": float(duration), "label": ID_TO_LABEL[int(pred_labels[0])]}]
+    if segments[0]["start"] > 0.0:
+        segments[0]["start"] = 0.0
+    segments[-1]["end"] = float(duration)
+    return segments
 
 
 def frame_projection(
@@ -527,18 +625,166 @@ def run_eval(cfg: Dict, ckpt_path: str):
     print(json.dumps(metrics, indent=2))
 
 
+@torch.no_grad()
+def infer_bench(cfg: Dict, ckpt_path: str):
+    device = torch.device("cuda" if torch.cuda.is_available() and not cfg["train"].get("cpu", False) else "cpu")
+    output_dir = Path(cfg["output_dir"])
+    pred_dir = Path(cfg["bench"]["pred_json_dir"])
+    pred_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tokenizer_dir = output_dir / "tokenizer"
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir if tokenizer_dir.exists() else cfg["model"]["pretrained_model_path"]))
+    cfg["model"]["line_token"] = cfg["model"].get("line_token", "<LINE>")
+    if cfg["model"]["line_token"] not in tokenizer.get_vocab():
+        tokenizer.add_special_tokens({"additional_special_tokens": [cfg["model"]["line_token"]]})
+
+    examples = load_bench_examples(cfg)
+    dataset = LyricsLineDataset(examples, tokenizer, {**cfg["data"], **cfg["model"]})
+    loader = DataLoader(dataset, batch_size=int(cfg["eval"].get("batch_size", 1)), shuffle=False, collate_fn=collate)
+
+    model = LongformerLineClassifier(
+        cfg["model"]["pretrained_model_path"], len(tokenizer), len(LABELS), float(cfg["model"].get("dropout", 0.1))
+    ).to(device)
+    state = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(state["model"])
+    model.eval()
+
+    line_rows = []
+    song_rows = []
+    y_true_all, y_pred_all = [], []
+    missing_ids = set(read_scp_ids(cfg["bench"]["scp_path"])) - {x.song_id for x in examples}
+    bench_label_map = load_bench_labels(cfg["bench"]["ann_dir"])
+
+    for batch in tqdm(loader, desc="bench infer"):
+        logits, boundary_logits = model(
+            batch["input_ids"].to(device),
+            batch["attention_mask"].to(device),
+            batch["global_attention_mask"].to(device),
+            batch["line_positions"].to(device),
+        )
+        preds = logits.argmax(-1).cpu().numpy()
+        boundary_scores = torch.sigmoid(boundary_logits).cpu().numpy()
+        labels = batch["line_labels"].numpy()
+        mask = batch["line_mask"].numpy()
+        for i, song_id in enumerate(batch["song_id"]):
+            n = int(mask[i].sum())
+            pred = preds[i, :n]
+            gold = labels[i, :n]
+            starts = batch["line_starts"][i, :n].numpy()
+            ends = batch["line_ends"][i, :n].numpy()
+            intervals = batch["intervals"][i]
+            duration = intervals_duration(intervals, float(ends[-1]) if n else 1.0)
+            segments = line_predictions_to_segments(
+                pred,
+                starts,
+                ends,
+                duration,
+                min_segment_dur=float(cfg["bench"].get("min_segment_dur", 0.25)),
+            )
+            (pred_dir / f"{song_id}.json").write_text(json.dumps(segments, indent=2))
+
+            y_true_all.extend(gold.tolist())
+            y_pred_all.extend(pred.tolist())
+            song_rows.append(
+                {
+                    "song_id": song_id,
+                    "num_lines": n,
+                    "line_acc": float((pred == gold).mean()) if n else 0.0,
+                    "duration": duration,
+                }
+            )
+            for j in range(n):
+                line_rows.append(
+                    {
+                        "song_id": song_id,
+                        "line_idx": j,
+                        "start": float(starts[j]),
+                        "end": float(ends[j]),
+                        "text": batch["texts"][i][j],
+                        "gold_label": ID_TO_LABEL[int(gold[j])],
+                        "pred_label": ID_TO_LABEL[int(pred[j])],
+                        "boundary_score": float(boundary_scores[i, j]),
+                    }
+                )
+
+    for song_id in sorted(missing_ids):
+        duration = intervals_duration(bench_label_map.get(song_id, []), 1.0)
+        fallback = [{"start": 0.0, "end": float(duration), "label": "silence"}]
+        (pred_dir / f"{song_id}.json").write_text(json.dumps(fallback, indent=2))
+        song_rows.append({"song_id": song_id, "num_lines": 0, "line_acc": 0.0, "duration": duration})
+
+    line_pred_csv = output_dir / "bench_line_predictions.csv"
+    with line_pred_csv.open("w", newline="") as f:
+        fieldnames = ["song_id", "line_idx", "start", "end", "text", "gold_label", "pred_label", "boundary_score"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(line_rows)
+
+    song_csv = output_dir / "bench_song_line_metrics.csv"
+    with song_csv.open("w", newline="") as f:
+        fieldnames = ["song_id", "num_lines", "line_acc", "duration"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(song_rows)
+
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true_all,
+        y_pred_all,
+        labels=list(range(len(LABELS))),
+        zero_division=0,
+    )
+    macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(
+        y_true_all, y_pred_all, average="macro", zero_division=0
+    )
+    weighted_p, weighted_r, weighted_f1, _ = precision_recall_fscore_support(
+        y_true_all, y_pred_all, average="weighted", zero_division=0
+    )
+    metrics = {
+        "num_bench_songs_requested": len(read_scp_ids(cfg["bench"]["scp_path"])),
+        "num_bench_songs_with_lyrics_and_labels": len(examples),
+        "num_missing_or_unusable_songs": len(missing_ids),
+        "missing_or_unusable_song_ids": sorted(missing_ids),
+        "num_lines": len(y_true_all),
+        "line_acc": float((np.array(y_true_all) == np.array(y_pred_all)).mean()) if y_true_all else 0.0,
+        "macro_precision": float(macro_p),
+        "macro_recall": float(macro_r),
+        "macro_f1": float(macro_f1),
+        "weighted_precision": float(weighted_p),
+        "weighted_recall": float(weighted_r),
+        "weighted_f1": float(weighted_f1),
+        "per_class": {
+            LABELS[i]: {
+                "precision": float(precision[i]),
+                "recall": float(recall[i]),
+                "f1": float(f1[i]),
+                "support": int(support[i]),
+            }
+            for i in range(len(LABELS))
+        },
+        "pred_json_dir": str(pred_dir),
+        "line_predictions_csv": str(line_pred_csv),
+        "song_line_metrics_csv": str(song_csv),
+    }
+    (output_dir / "bench_ekaputra_line_metrics.json").write_text(json.dumps(metrics, indent=2))
+    print(json.dumps(metrics, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--mode", choices=["train", "eval"], default="train")
+    parser.add_argument("--mode", choices=["train", "eval", "infer_bench"], default="train")
     parser.add_argument("--ckpt", default="")
     args = parser.parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text())
     if args.mode == "train":
         train(cfg)
-    else:
+    elif args.mode == "eval":
         ckpt = args.ckpt or str(Path(cfg["output_dir"]) / "best.pt")
         run_eval(cfg, ckpt)
+    else:
+        ckpt = args.ckpt or str(Path(cfg["output_dir"]) / "best.pt")
+        infer_bench(cfg, ckpt)
 
 
 if __name__ == "__main__":
