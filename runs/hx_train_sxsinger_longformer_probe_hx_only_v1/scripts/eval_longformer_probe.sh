@@ -14,6 +14,7 @@ python src/lyrics_only_longformer/run_lyrics_longformer.py \
   --ckpt /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_hx_only_v1/results/best.pt
 
 cd /home/hbli/songformer/repo/SongFormer/src/SongFormer
+export PYTHONPATH=/home/hbli/songformer/repo/SongFormer/src/SongFormer:/home/hbli/songformer/repo/SongFormer/src/third_party:${PYTHONPATH:-}
 
 python utils/convert_res2msa_txt.py \
   --input_folder /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_hx_only_v1/results/bench_pred/hx \
