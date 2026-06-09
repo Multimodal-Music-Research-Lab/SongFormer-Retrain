@@ -21,6 +21,7 @@ from transformers import AutoModel, AutoTokenizer, get_linear_schedule_with_warm
 LABELS = ["intro", "verse", "chorus", "bridge", "inst", "outro", "pre-chorus", "silence"]
 LABEL_TO_ID = {x: i for i, x in enumerate(LABELS)}
 ID_TO_LABEL = {i: x for x, i in LABEL_TO_ID.items()}
+IGNORE_LABEL_ID = -100
 
 
 def normalize_label(label: str) -> str:
@@ -37,6 +38,14 @@ def normalize_label(label: str) -> str:
     }
     label = mapping.get(label, label)
     return label if label in LABEL_TO_ID else "silence"
+
+
+def normalize_hook_label(label: str) -> str:
+    raw = (label or "NO_LABEL").strip()
+    lowered = raw.lower().replace("_", " ")
+    if lowered in {"no label", "nolabel", "unknown", ""}:
+        return "NO_LABEL"
+    return normalize_label(raw)
 
 
 def read_ids(path: str) -> List[str]:
@@ -106,7 +115,7 @@ def load_hook_labels(paths: List[str]) -> Dict[str, List[Tuple[float, float, str
                 if isinstance(label, list):
                     label = label[0] if label else "silence"
                 grouped.setdefault(song_id, []).append(
-                    (float(obj["segment_start"]), float(obj["segment_end"]), normalize_label(label))
+                    (float(obj["segment_start"]), float(obj["segment_end"]), normalize_hook_label(label))
                 )
     for song_id in list(grouped):
         grouped[song_id] = sorted(grouped[song_id], key=lambda x: (x[0], x[1]))
@@ -135,7 +144,12 @@ def flatten_soulx_lines(path: Path) -> List[Dict]:
     return rows
 
 
-def overlap_label(line_start: float, line_end: float, intervals: List[Tuple[float, float, str]]) -> int:
+def overlap_label(
+    line_start: float,
+    line_end: float,
+    intervals: List[Tuple[float, float, str]],
+    ignore_uncovered: bool = False,
+) -> int:
     best_label = "silence"
     best_overlap = 0.0
     mid = 0.5 * (line_start + line_end)
@@ -149,6 +163,8 @@ def overlap_label(line_start: float, line_end: float, intervals: List[Tuple[floa
             mid_label = label
     if best_overlap <= 0.0 and mid_label is not None:
         best_label = mid_label
+    if best_label == "NO_LABEL" or (ignore_uncovered and best_overlap <= 0.0 and mid_label is None):
+        return IGNORE_LABEL_ID
     return LABEL_TO_ID[normalize_label(best_label)]
 
 
@@ -187,7 +203,14 @@ class LyricsLineDataset(Dataset):
             line_positions.append(len(input_ids))
             input_ids.append(self.line_token_id)
             input_ids.extend(ids)
-            labels.append(overlap_label(line["start"], line["end"], ex.intervals))
+            labels.append(
+                overlap_label(
+                    line["start"],
+                    line["end"],
+                    ex.intervals,
+                    ignore_uncovered=(ex.source == "hook"),
+                )
+            )
             boundary.append(boundary_label(line["start"], ex.intervals, self.boundary_tolerance))
             starts.append(line["start"])
             ends.append(line["end"])
@@ -424,6 +447,16 @@ def hit_rate(pred_scores: np.ndarray, true_boundaries: List[float], frame_rate: 
     return hits / len(true_boundaries)
 
 
+def valid_label_mask(labels: np.ndarray) -> np.ndarray:
+    return labels != IGNORE_LABEL_ID
+
+
+def label_name(label_id: int) -> str:
+    if int(label_id) == IGNORE_LABEL_ID:
+        return "IGNORE"
+    return ID_TO_LABEL[int(label_id)]
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, cfg: Dict, output_csv: Optional[Path] = None) -> Dict[str, float]:
     model.eval()
@@ -453,8 +486,9 @@ def evaluate(model, loader, device, cfg: Dict, output_csv: Optional[Path] = None
             )
             all_true.append(true_frames)
             all_pred.append(pred_frames)
-            line_true.extend(y.tolist())
-            line_pred.extend(p.tolist())
+            valid = valid_label_mask(y)
+            line_true.extend(y[valid].tolist())
+            line_pred.extend(p[valid].tolist())
             hr05 = hit_rate(pred_boundary, true_boundaries, frame_rate, 0.5)
             hr3 = hit_rate(pred_boundary, true_boundaries, frame_rate, 3.0)
             hrs05.append(hr05)
@@ -464,7 +498,7 @@ def evaluate(model, loader, device, cfg: Dict, output_csv: Optional[Path] = None
                     "song_id": batch["song_id"][i],
                     "source": batch["source"][i],
                     "num_lines": n,
-                    "line_acc": float((p == y).mean()) if n else 0.0,
+                    "line_acc": float((p[valid] == y[valid]).mean()) if valid.any() else 0.0,
                     "hr_0p5": hr05,
                     "hr_3": hr3,
                 }
@@ -560,7 +594,14 @@ def train(cfg: Dict):
                 line_labels = batch["line_labels"].to(device)
                 line_mask = batch["line_mask"].to(device)
                 boundary_labels = batch["boundary_labels"].to(device)
-                loss_function = F.cross_entropy(logits.view(-1, len(LABELS)), line_labels.view(-1), ignore_index=-100)
+                if (line_labels != IGNORE_LABEL_ID).any():
+                    loss_function = F.cross_entropy(
+                        logits.view(-1, len(LABELS)),
+                        line_labels.view(-1),
+                        ignore_index=IGNORE_LABEL_ID,
+                    )
+                else:
+                    loss_function = logits.sum() * 0.0
                 bce = F.binary_cross_entropy_with_logits(
                     boundary_logits[line_mask], boundary_labels[line_mask], reduction="mean"
                 )
@@ -773,8 +814,9 @@ def infer_bench(cfg: Dict, ckpt_path: str):
 
 def label_counts_json(values: List[int]) -> str:
     counts = {label: 0 for label in LABELS}
+    counts["IGNORE"] = 0
     for v in values:
-        counts[ID_TO_LABEL[int(v)]] += 1
+        counts[label_name(int(v))] += 1
     return json.dumps(counts, ensure_ascii=False)
 
 
@@ -838,21 +880,22 @@ def infer_split_metrics(cfg: Dict, ckpt_path: str, split: str):
             gold = labels[i, :n].astype(int)
             starts = batch["line_starts"][i, :n].numpy()
             ends = batch["line_ends"][i, :n].numpy()
-            y_true = gold.tolist()
-            y_pred = pred.tolist()
+            valid = valid_label_mask(gold)
+            y_true = gold[valid].tolist()
+            y_pred = pred[valid].tolist()
             y_true_all.extend(y_true)
             y_pred_all.extend(y_pred)
 
-            if n:
+            if len(y_true) > 0:
                 macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(
                     y_true, y_pred, average="macro", zero_division=0
                 )
                 weighted_p, weighted_r, weighted_f1, _ = precision_recall_fscore_support(
                     y_true, y_pred, average="weighted", zero_division=0
                 )
-                line_acc = float((pred == gold).mean())
-                pred_silence_ratio = float((pred == LABEL_TO_ID["silence"]).mean())
-                gold_silence_ratio = float((gold == LABEL_TO_ID["silence"]).mean())
+                line_acc = float((pred[valid] == gold[valid]).mean())
+                pred_silence_ratio = float((pred[valid] == LABEL_TO_ID["silence"]).mean())
+                gold_silence_ratio = float((gold[valid] == LABEL_TO_ID["silence"]).mean())
             else:
                 macro_p = macro_r = macro_f1 = weighted_p = weighted_r = weighted_f1 = 0.0
                 line_acc = pred_silence_ratio = gold_silence_ratio = 0.0
@@ -861,6 +904,8 @@ def infer_split_metrics(cfg: Dict, ckpt_path: str, split: str):
                 "song_id": song_id,
                 "source": batch["source"][i],
                 "num_lines": n,
+                "num_labeled_lines": int(valid.sum()),
+                "num_ignored_lines": int((~valid).sum()),
                 "duration": intervals_duration(batch["intervals"][i], float(ends[-1]) if n else 1.0),
                 "line_acc": line_acc,
                 "macro_precision": float(macro_p),
@@ -871,8 +916,8 @@ def infer_split_metrics(cfg: Dict, ckpt_path: str, split: str):
                 "weighted_f1": float(weighted_f1),
                 "pred_silence_ratio": pred_silence_ratio,
                 "gold_silence_ratio": gold_silence_ratio,
-                "gold_label_counts": label_counts_json(y_true),
-                "pred_label_counts": label_counts_json(y_pred),
+                "gold_label_counts": label_counts_json(gold.tolist()),
+                "pred_label_counts": label_counts_json(pred.tolist()),
             }
             row.update(class_metric_row("class", y_true, y_pred))
             song_rows.append(row)
@@ -886,8 +931,8 @@ def infer_split_metrics(cfg: Dict, ckpt_path: str, split: str):
                         "start": float(starts[j]),
                         "end": float(ends[j]),
                         "text": batch["texts"][i][j],
-                        "gold_label": ID_TO_LABEL[int(gold[j])],
-                        "pred_label": ID_TO_LABEL[int(pred[j])],
+                        "gold_label": label_name(int(gold[j])),
+                        "pred_label": label_name(int(pred[j])),
                         "boundary_score": float(boundary_scores[i, j]),
                     }
                 )
