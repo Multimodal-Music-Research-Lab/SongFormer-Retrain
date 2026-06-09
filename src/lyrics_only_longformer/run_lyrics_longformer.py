@@ -942,10 +942,110 @@ def infer_split_metrics(cfg: Dict, ckpt_path: str, split: str):
     print(json.dumps(summary, indent=2))
 
 
+def write_msa_txt(path: Path, intervals: List[Tuple[float, float, str]]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for start, _end, label in sorted(intervals, key=lambda x: (x[0], x[1])):
+        rows.append(f"{float(start):.6f} {normalize_label(label)}")
+    duration = intervals_duration(intervals, 1.0)
+    rows.append(f"{duration:.6f} end")
+    path.write_text("\n".join(rows) + "\n")
+
+
+@torch.no_grad()
+def infer_split_segments(cfg: Dict, ckpt_path: str, split: str):
+    device = torch.device("cuda" if torch.cuda.is_available() and not cfg["train"].get("cpu", False) else "cpu")
+    output_dir = Path(cfg["output_dir"])
+    pred_dir = output_dir / f"{split}_pred" / "json"
+    ann_txt_dir = output_dir / "eval" / split / "ann_txt"
+    pred_dir.mkdir(parents=True, exist_ok=True)
+    ann_txt_dir.mkdir(parents=True, exist_ok=True)
+
+    tokenizer_dir = output_dir / "tokenizer"
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir if tokenizer_dir.exists() else cfg["model"]["pretrained_model_path"]))
+    cfg["model"]["line_token"] = cfg["model"].get("line_token", "<LINE>")
+    if cfg["model"]["line_token"] not in tokenizer.get_vocab():
+        tokenizer.add_special_tokens({"additional_special_tokens": [cfg["model"]["line_token"]]})
+
+    examples = load_examples(cfg, split)
+    dataset = LyricsLineDataset(examples, tokenizer, {**cfg["data"], **cfg["model"]})
+    loader = DataLoader(dataset, batch_size=int(cfg["eval"].get("batch_size", 1)), shuffle=False, collate_fn=collate)
+
+    model = LongformerLineClassifier(
+        cfg["model"]["pretrained_model_path"], len(tokenizer), len(LABELS), float(cfg["model"].get("dropout", 0.1))
+    ).to(device)
+    state = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(state["model"])
+    model.eval()
+
+    rows = []
+    for batch in tqdm(loader, desc=f"{split} split segment infer"):
+        logits, _boundary_logits = model(
+            batch["input_ids"].to(device),
+            batch["attention_mask"].to(device),
+            batch["global_attention_mask"].to(device),
+            batch["line_positions"].to(device),
+        )
+        preds = logits.argmax(-1).cpu().numpy()
+        mask = batch["line_mask"].numpy()
+        labels = batch["line_labels"].numpy()
+
+        for i, song_id in enumerate(batch["song_id"]):
+            n = int(mask[i].sum())
+            pred = preds[i, :n]
+            gold = labels[i, :n]
+            starts = batch["line_starts"][i, :n].numpy()
+            ends = batch["line_ends"][i, :n].numpy()
+            intervals = batch["intervals"][i]
+            duration = intervals_duration(intervals, float(ends[-1]) if n else 1.0)
+            segments = line_predictions_to_segments(
+                pred,
+                starts,
+                ends,
+                duration,
+                min_segment_dur=float(cfg.get("split_eval", {}).get("min_segment_dur", 0.25)),
+            )
+            (pred_dir / f"{song_id}.json").write_text(json.dumps(segments, indent=2))
+            write_msa_txt(ann_txt_dir / f"{song_id}.txt", intervals)
+            rows.append(
+                {
+                    "song_id": song_id,
+                    "source": batch["source"][i],
+                    "num_lines": n,
+                    "line_acc": float((pred == gold).mean()) if n else 0.0,
+                    "duration": duration,
+                    "pred_json": str(pred_dir / f"{song_id}.json"),
+                    "ann_txt": str(ann_txt_dir / f"{song_id}.txt"),
+                }
+            )
+
+    summary = {
+        "split": split,
+        "num_songs": len(rows),
+        "pred_json_dir": str(pred_dir),
+        "ann_txt_dir": str(ann_txt_dir),
+        "est_txt_dir": str(output_dir / "eval" / split / "est_txt"),
+        "metrics_dir": str(output_dir / "eval" / split / "metrics"),
+        "song_manifest_csv": str(output_dir / f"{split}_segment_infer_manifest.csv"),
+    }
+    manifest_path = output_dir / f"{split}_segment_infer_manifest.csv"
+    if rows:
+        with manifest_path.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+    (output_dir / f"{split}_segment_infer_summary.json").write_text(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--mode", choices=["train", "eval", "infer_bench", "infer_split"], default="train")
+    parser.add_argument(
+        "--mode",
+        choices=["train", "eval", "infer_bench", "infer_split", "infer_split_segments"],
+        default="train",
+    )
     parser.add_argument("--ckpt", default="")
     parser.add_argument("--split", default="train")
     args = parser.parse_args()
@@ -959,6 +1059,8 @@ def main():
         ckpt = args.ckpt or str(Path(cfg["output_dir"]) / "best.pt")
         if args.mode == "infer_bench":
             infer_bench(cfg, ckpt)
+        elif args.mode == "infer_split_segments":
+            infer_split_segments(cfg, ckpt, args.split)
         else:
             infer_split_metrics(cfg, ckpt, args.split)
 
