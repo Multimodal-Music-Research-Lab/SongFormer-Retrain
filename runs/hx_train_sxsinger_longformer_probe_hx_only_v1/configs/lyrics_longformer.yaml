@@ -1,0 +1,51 @@
+output_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_hx_only_v1/results
+
+model:
+  pretrained_model_path: /home/hbli/songformer/repo/SongFormer/src/third_party/text_models/allenai_longformer-base-4096
+  line_token: <LINE>
+  max_length: 4096
+  dropout: 0.1
+
+data:
+  enabled_sources:
+    - hx
+  hx_lyrics_dir: /mnt/ssd/hbli/datasets/songformer/songformdb/HX/soulxsinger_lyrics
+  hook_lyrics_dir: /mnt/ssd/hbli/songformer/runs/soulxsinger_lyrics/hooktheory
+  hx_label_path: /mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl
+  hook_structure_jsonl_paths:
+    - /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/HookTheoryV3_for_model.jsonl
+  boundary_tolerance_sec: 3.0
+  splits:
+    hx:
+      train: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/train_hx.txt
+      val: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/val.txt
+    hook:
+      train: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/train_hook.txt
+
+train:
+  seed: 42
+  epochs: 50
+  max_steps: 12000
+  warmup_steps: 500
+  batch_size: 2
+  num_workers: 2
+  lr: 2.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  function_loss_weight: 1.0
+  boundary_loss_weight: 0.2
+  cpu: false
+
+eval:
+  batch_size: 1
+  eval_steps: 800
+  frame_rate: 8.333
+
+bench:
+  scp_path: /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/hx_bench.scp
+  lyrics_dir: /mnt/ssd/hbli/datasets/songformer/songformbench/data/soulxsinger_lyrics/HarmonixSet
+  ann_dir: /mnt/ssd/hbli/datasets/songformer/songformbench/data/labels/HarmonixSet
+  pred_json_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_hx_only_v1/results/bench_pred/hx
+  est_txt_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_hx_only_v1/results/eval/hx/est_txt
+  metrics_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_hx_only_v1/results/eval/hx/metrics
+  min_segment_dur: 0.25

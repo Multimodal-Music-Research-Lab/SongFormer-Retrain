@@ -276,11 +276,12 @@ class LongformerLineClassifier(nn.Module):
 
 def load_examples(cfg: Dict, split: str) -> List[SongExample]:
     data_cfg = cfg["data"]
+    enabled_sources = set(data_cfg.get("enabled_sources", ["hx", "hook"]))
     hx_labels = load_hx_labels(data_cfg["hx_label_path"])
-    hook_labels = load_hook_labels(data_cfg["hook_structure_jsonl_paths"])
+    hook_labels = load_hook_labels(data_cfg["hook_structure_jsonl_paths"]) if "hook" in enabled_sources else {}
     examples = []
 
-    if split in data_cfg["splits"].get("hx", {}):
+    if "hx" in enabled_sources and split in data_cfg["splits"].get("hx", {}):
         for song_id in read_ids(data_cfg["splits"]["hx"][split]):
             lyric_path = Path(data_cfg["hx_lyrics_dir"]) / f"{song_id}.json"
             if lyric_path.exists() and song_id in hx_labels:
@@ -288,7 +289,7 @@ def load_examples(cfg: Dict, split: str) -> List[SongExample]:
                 if lines:
                     examples.append(SongExample(song_id, lines, hx_labels[song_id], "hx"))
 
-    if split in data_cfg["splits"].get("hook", {}):
+    if "hook" in enabled_sources and split in data_cfg["splits"].get("hook", {}):
         for song_id in read_ids(data_cfg["splits"]["hook"][split]):
             lyric_path = Path(data_cfg["hook_lyrics_dir"]) / f"{song_id}.json"
             if lyric_path.exists() and song_id in hook_labels:
