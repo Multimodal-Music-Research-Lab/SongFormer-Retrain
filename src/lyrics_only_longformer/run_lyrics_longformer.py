@@ -770,11 +770,184 @@ def infer_bench(cfg: Dict, ckpt_path: str):
     print(json.dumps(metrics, indent=2))
 
 
+def label_counts_json(values: List[int]) -> str:
+    counts = {label: 0 for label in LABELS}
+    for v in values:
+        counts[ID_TO_LABEL[int(v)]] += 1
+    return json.dumps(counts, ensure_ascii=False)
+
+
+def class_metric_row(prefix: str, y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
+    if not y_true:
+        return {f"{prefix}_{label}_f1": 0.0 for label in LABELS}
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true, y_pred, labels=list(range(len(LABELS))), zero_division=0
+    )
+    row = {}
+    for i, label in enumerate(LABELS):
+        row[f"{prefix}_{label}_precision"] = float(precision[i])
+        row[f"{prefix}_{label}_recall"] = float(recall[i])
+        row[f"{prefix}_{label}_f1"] = float(f1[i])
+        row[f"{prefix}_{label}_support"] = int(support[i])
+    return row
+
+
+@torch.no_grad()
+def infer_split_metrics(cfg: Dict, ckpt_path: str, split: str):
+    device = torch.device("cuda" if torch.cuda.is_available() and not cfg["train"].get("cpu", False) else "cpu")
+    output_dir = Path(cfg["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    tokenizer_dir = output_dir / "tokenizer"
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir if tokenizer_dir.exists() else cfg["model"]["pretrained_model_path"]))
+    cfg["model"]["line_token"] = cfg["model"].get("line_token", "<LINE>")
+    if cfg["model"]["line_token"] not in tokenizer.get_vocab():
+        tokenizer.add_special_tokens({"additional_special_tokens": [cfg["model"]["line_token"]]})
+
+    examples = load_examples(cfg, split)
+    dataset = LyricsLineDataset(examples, tokenizer, {**cfg["data"], **cfg["model"]})
+    loader = DataLoader(dataset, batch_size=int(cfg["eval"].get("batch_size", 1)), shuffle=False, collate_fn=collate)
+
+    model = LongformerLineClassifier(
+        cfg["model"]["pretrained_model_path"], len(tokenizer), len(LABELS), float(cfg["model"].get("dropout", 0.1))
+    ).to(device)
+    state = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(state["model"])
+    model.eval()
+
+    song_rows = []
+    line_rows = []
+    y_true_all, y_pred_all = [], []
+
+    for batch in tqdm(loader, desc=f"{split} split metrics"):
+        logits, boundary_logits = model(
+            batch["input_ids"].to(device),
+            batch["attention_mask"].to(device),
+            batch["global_attention_mask"].to(device),
+            batch["line_positions"].to(device),
+        )
+        preds = logits.argmax(-1).cpu().numpy()
+        boundary_scores = torch.sigmoid(boundary_logits).cpu().numpy()
+        labels = batch["line_labels"].numpy()
+        mask = batch["line_mask"].numpy()
+
+        for i, song_id in enumerate(batch["song_id"]):
+            n = int(mask[i].sum())
+            pred = preds[i, :n].astype(int)
+            gold = labels[i, :n].astype(int)
+            starts = batch["line_starts"][i, :n].numpy()
+            ends = batch["line_ends"][i, :n].numpy()
+            y_true = gold.tolist()
+            y_pred = pred.tolist()
+            y_true_all.extend(y_true)
+            y_pred_all.extend(y_pred)
+
+            if n:
+                macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(
+                    y_true, y_pred, average="macro", zero_division=0
+                )
+                weighted_p, weighted_r, weighted_f1, _ = precision_recall_fscore_support(
+                    y_true, y_pred, average="weighted", zero_division=0
+                )
+                line_acc = float((pred == gold).mean())
+                pred_silence_ratio = float((pred == LABEL_TO_ID["silence"]).mean())
+                gold_silence_ratio = float((gold == LABEL_TO_ID["silence"]).mean())
+            else:
+                macro_p = macro_r = macro_f1 = weighted_p = weighted_r = weighted_f1 = 0.0
+                line_acc = pred_silence_ratio = gold_silence_ratio = 0.0
+
+            row = {
+                "song_id": song_id,
+                "source": batch["source"][i],
+                "num_lines": n,
+                "duration": intervals_duration(batch["intervals"][i], float(ends[-1]) if n else 1.0),
+                "line_acc": line_acc,
+                "macro_precision": float(macro_p),
+                "macro_recall": float(macro_r),
+                "macro_f1": float(macro_f1),
+                "weighted_precision": float(weighted_p),
+                "weighted_recall": float(weighted_r),
+                "weighted_f1": float(weighted_f1),
+                "pred_silence_ratio": pred_silence_ratio,
+                "gold_silence_ratio": gold_silence_ratio,
+                "gold_label_counts": label_counts_json(y_true),
+                "pred_label_counts": label_counts_json(y_pred),
+            }
+            row.update(class_metric_row("class", y_true, y_pred))
+            song_rows.append(row)
+
+            for j in range(n):
+                line_rows.append(
+                    {
+                        "song_id": song_id,
+                        "source": batch["source"][i],
+                        "line_idx": j,
+                        "start": float(starts[j]),
+                        "end": float(ends[j]),
+                        "text": batch["texts"][i][j],
+                        "gold_label": ID_TO_LABEL[int(gold[j])],
+                        "pred_label": ID_TO_LABEL[int(pred[j])],
+                        "boundary_score": float(boundary_scores[i, j]),
+                    }
+                )
+
+    song_csv = output_dir / f"{split}_song_line_metrics.csv"
+    line_csv = output_dir / f"{split}_line_predictions.csv"
+    summary_json = output_dir / f"{split}_ekaputra_line_metrics.json"
+
+    if song_rows:
+        with song_csv.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(song_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(song_rows)
+    if line_rows:
+        with line_csv.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(line_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(line_rows)
+
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true_all, y_pred_all, labels=list(range(len(LABELS))), zero_division=0
+    )
+    macro_p, macro_r, macro_f1, _ = precision_recall_fscore_support(
+        y_true_all, y_pred_all, average="macro", zero_division=0
+    )
+    weighted_p, weighted_r, weighted_f1, _ = precision_recall_fscore_support(
+        y_true_all, y_pred_all, average="weighted", zero_division=0
+    )
+    summary = {
+        "split": split,
+        "num_songs": len(song_rows),
+        "num_lines": len(y_true_all),
+        "line_acc": float((np.array(y_true_all) == np.array(y_pred_all)).mean()) if y_true_all else 0.0,
+        "macro_precision": float(macro_p),
+        "macro_recall": float(macro_r),
+        "macro_f1": float(macro_f1),
+        "weighted_precision": float(weighted_p),
+        "weighted_recall": float(weighted_r),
+        "weighted_f1": float(weighted_f1),
+        "song_metrics_csv": str(song_csv),
+        "line_predictions_csv": str(line_csv),
+        "per_class": {
+            LABELS[i]: {
+                "precision": float(precision[i]),
+                "recall": float(recall[i]),
+                "f1": float(f1[i]),
+                "support": int(support[i]),
+            }
+            for i in range(len(LABELS))
+        },
+    }
+    summary_json.write_text(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--mode", choices=["train", "eval", "infer_bench"], default="train")
+    parser.add_argument("--mode", choices=["train", "eval", "infer_bench", "infer_split"], default="train")
     parser.add_argument("--ckpt", default="")
+    parser.add_argument("--split", default="train")
     args = parser.parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text())
     if args.mode == "train":
@@ -784,7 +957,10 @@ def main():
         run_eval(cfg, ckpt)
     else:
         ckpt = args.ckpt or str(Path(cfg["output_dir"]) / "best.pt")
-        infer_bench(cfg, ckpt)
+        if args.mode == "infer_bench":
+            infer_bench(cfg, ckpt)
+        else:
+            infer_split_metrics(cfg, ckpt, args.split)
 
 
 if __name__ == "__main__":
