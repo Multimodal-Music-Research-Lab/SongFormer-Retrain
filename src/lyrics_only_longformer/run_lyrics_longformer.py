@@ -285,7 +285,7 @@ class LongformerLineClassifier(nn.Module):
         self.function_head = nn.Linear(hidden, num_labels)
         self.boundary_head = nn.Linear(hidden, 1)
 
-    def forward(self, input_ids, attention_mask, global_attention_mask, line_positions):
+    def forward(self, input_ids, attention_mask, global_attention_mask, line_positions, return_hidden: bool = False):
         enc = self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -294,7 +294,11 @@ class LongformerLineClassifier(nn.Module):
         gather_index = line_positions.unsqueeze(-1).expand(-1, -1, enc.shape[-1])
         line_hidden = enc.gather(1, gather_index)
         line_hidden = self.dropout(line_hidden)
-        return self.function_head(line_hidden), self.boundary_head(line_hidden).squeeze(-1)
+        function_logits = self.function_head(line_hidden)
+        boundary_logits = self.boundary_head(line_hidden).squeeze(-1)
+        if return_hidden:
+            return function_logits, boundary_logits, line_hidden
+        return function_logits, boundary_logits
 
 
 def load_examples(cfg: Dict, split: str) -> List[SongExample]:
@@ -1084,16 +1088,104 @@ def infer_split_segments(cfg: Dict, ckpt_path: str, split: str):
     print(json.dumps(summary, indent=2))
 
 
+@torch.no_grad()
+def export_features(cfg: Dict, ckpt_path: str, split: str, output_dir: str, source_filter: str = "all"):
+    device = torch.device("cuda" if torch.cuda.is_available() and not cfg["train"].get("cpu", False) else "cpu")
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    tokenizer_dir = Path(cfg["output_dir"]) / "tokenizer"
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_dir if tokenizer_dir.exists() else cfg["model"]["pretrained_model_path"]))
+    cfg["model"]["line_token"] = cfg["model"].get("line_token", "<LINE>")
+    if cfg["model"]["line_token"] not in tokenizer.get_vocab():
+        tokenizer.add_special_tokens({"additional_special_tokens": [cfg["model"]["line_token"]]})
+
+    if split == "bench":
+        examples = load_bench_examples(cfg)
+    else:
+        examples = load_examples(cfg, split)
+    if source_filter != "all":
+        examples = [x for x in examples if x.source == source_filter]
+
+    dataset = LyricsLineDataset(examples, tokenizer, {**cfg["data"], **cfg["model"]})
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate)
+
+    model = LongformerLineClassifier(
+        cfg["model"]["pretrained_model_path"], len(tokenizer), len(LABELS), float(cfg["model"].get("dropout", 0.1))
+    ).to(device)
+    state = torch.load(ckpt_path, map_location=device)
+    model.load_state_dict(state["model"])
+    model.eval()
+
+    manifest_rows = []
+    for batch in tqdm(loader, desc=f"export {split} features"):
+        logits, boundary_logits, hidden = model(
+            batch["input_ids"].to(device),
+            batch["attention_mask"].to(device),
+            batch["global_attention_mask"].to(device),
+            batch["line_positions"].to(device),
+            return_hidden=True,
+        )
+        mask = batch["line_mask"].numpy()
+        labels = batch["line_labels"].numpy()
+        for i, song_id in enumerate(batch["song_id"]):
+            n = int(mask[i].sum())
+            out_file = output_path / f"{song_id}.npz"
+            line_hidden = hidden[i, :n].detach().cpu().numpy().astype(np.float32)
+            line_logits = logits[i, :n].detach().cpu().numpy().astype(np.float32)
+            line_boundary_logits = boundary_logits[i, :n].detach().cpu().numpy().astype(np.float32)
+            line_start_secs = batch["line_starts"][i, :n].numpy().astype(np.float32)
+            line_end_secs = batch["line_ends"][i, :n].numpy().astype(np.float32)
+            line_labels = labels[i, :n].astype(np.int64)
+            np.savez_compressed(
+                out_file,
+                line_embs=line_hidden,
+                line_logits=line_logits,
+                line_boundary_logits=line_boundary_logits,
+                line_start_secs=line_start_secs,
+                line_end_secs=line_end_secs,
+                line_labels=line_labels,
+            )
+            manifest_rows.append(
+                {
+                    "song_id": song_id,
+                    "source": batch["source"][i],
+                    "num_lines": n,
+                    "num_labeled_lines": int((line_labels != IGNORE_LABEL_ID).sum()),
+                    "num_ignored_lines": int((line_labels == IGNORE_LABEL_ID).sum()),
+                    "path": str(out_file),
+                }
+            )
+
+    manifest_path = output_path / "manifest.csv"
+    with manifest_path.open("w", newline="") as f:
+        fieldnames = ["song_id", "source", "num_lines", "num_labeled_lines", "num_ignored_lines", "path"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(manifest_rows)
+    summary = {
+        "split": split,
+        "source_filter": source_filter,
+        "num_songs": len(manifest_rows),
+        "output_dir": str(output_path),
+        "manifest_path": str(manifest_path),
+    }
+    (output_path / "summary.json").write_text(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument(
         "--mode",
-        choices=["train", "eval", "infer_bench", "infer_split", "infer_split_segments"],
+        choices=["train", "eval", "infer_bench", "infer_split", "infer_split_segments", "export_features"],
         default="train",
     )
     parser.add_argument("--ckpt", default="")
     parser.add_argument("--split", default="train")
+    parser.add_argument("--output_dir", default="")
+    parser.add_argument("--source_filter", default="all")
     args = parser.parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text())
     if args.mode == "train":
@@ -1107,6 +1199,10 @@ def main():
             infer_bench(cfg, ckpt)
         elif args.mode == "infer_split_segments":
             infer_split_segments(cfg, ckpt, args.split)
+        elif args.mode == "export_features":
+            if not args.output_dir:
+                raise ValueError("--output_dir is required for export_features")
+            export_features(cfg, ckpt, args.split, args.output_dir, args.source_filter)
         else:
             infer_split_metrics(cfg, ckpt, args.split)
 
