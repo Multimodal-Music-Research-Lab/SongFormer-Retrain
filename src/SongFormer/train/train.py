@@ -409,13 +409,21 @@ def main(args, hparams):
                             logits, loss, losses = model(batch)
 
                         with TrainTimer(global_step, "time/backward_time", accelerator):
+                            balance_params = [
+                                p for p in model.parameters() if p.requires_grad
+                            ]
                             loss_sum = balancer.cal_mix_loss(
                                 {
                                     "loss_section": losses["loss_section"],
                                     "loss_function": losses["loss_function"],
                                 },
-                                list(model.parameters()),
+                                balance_params,
                                 accelerator=accelerator,
+                            )
+                            loss_sum = (
+                                loss_sum
+                                + losses.get("loss_alignment_weighted", 0.0)
+                                + losses.get("loss_lyrics_line_weighted", 0.0)
                             )
 
                             accelerator.backward(loss_sum)

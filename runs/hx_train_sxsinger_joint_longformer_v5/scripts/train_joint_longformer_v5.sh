@@ -16,12 +16,16 @@ export HF_HOME=${HF_HOME:-/home/hbli/songformer/cache/hf_cache}
 cd /home/hbli/songformer/repo/SongFormer/src/SongFormer
 export PYTHONPATH=$(realpath .):/home/hbli/songformer/repo/SongFormer/src/third_party:${PYTHONPATH:-}
 
-gpustat --id "${CUDA_VISIBLE_DEVICES}"
+if command -v gpustat >/dev/null 2>&1; then
+  gpustat --id "${CUDA_VISIBLE_DEVICES}"
+else
+  echo "gpustat not found; skip GPU status print"
+fi
 
 CFG=/home/hbli/songformer/repo/SongFormer/runs/hx_train_sxsinger_joint_longformer_v5/configs/SongFormer.yaml
 INIT_SEED=42
 
-accelerate launch --config_file train/accelerate_config/single_gpu.yaml \
+/home/hbli/songformer/env/miniforge3/envs/songformer/bin/accelerate launch --config_file train/accelerate_config/single_gpu.yaml \
   train/train.py \
   --config "${CFG}" \
   --log_interval 5 \
