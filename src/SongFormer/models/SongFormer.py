@@ -6,6 +6,7 @@ from dataset.custom_types import MsaInfo
 from msaf.eval import compute_results
 from postprocessing.functional import postprocess_functional_structure
 from x_transformers import Encoder
+from transformers import AutoModel, AutoTokenizer
 import bisect
 
 
@@ -246,6 +247,61 @@ class SoftmaxFocalLoss(nn.Module):
 
 
 
+class OnlineLongformerLyricsEncoder(nn.Module):
+    def __init__(
+        self,
+        model_path,
+        line_token="<LINE>",
+        num_labels=8,
+        dropout=0.1,
+        train_top_layers=2,
+        freeze_embeddings=True,
+    ):
+        super().__init__()
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        tokenizer.add_special_tokens({"additional_special_tokens": [line_token]})
+        self.longformer = AutoModel.from_pretrained(model_path)
+        self.longformer.resize_token_embeddings(len(tokenizer))
+        hidden_dim = self.longformer.config.hidden_size
+        self.dropout = nn.Dropout(dropout)
+        self.function_head = nn.Linear(hidden_dim, num_labels)
+
+        for param in self.longformer.parameters():
+            param.requires_grad = False
+        train_top_layers = int(train_top_layers)
+        if train_top_layers > 0 and hasattr(self.longformer, "encoder"):
+            for layer in self.longformer.encoder.layer[-train_top_layers:]:
+                for param in layer.parameters():
+                    param.requires_grad = True
+        if not freeze_embeddings and hasattr(self.longformer, "embeddings"):
+            for param in self.longformer.embeddings.parameters():
+                param.requires_grad = True
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        global_attention_mask,
+        line_positions,
+        line_masks=None,
+    ):
+        outputs = self.longformer(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            global_attention_mask=global_attention_mask,
+        )
+        hidden = outputs.last_hidden_state
+        safe_positions = line_positions.clamp(min=0, max=max(hidden.size(1) - 1, 0))
+        gather_index = safe_positions.unsqueeze(-1).expand(-1, -1, hidden.size(-1))
+        line_hidden = hidden.gather(1, gather_index)
+        line_hidden = self.dropout(line_hidden)
+        line_logits = self.function_head(line_hidden)
+        if line_masks is not None:
+            line_hidden = line_hidden.masked_fill(line_masks.unsqueeze(-1), 0.0)
+            line_logits = line_logits.masked_fill(line_masks.unsqueeze(-1), 0.0)
+        return line_hidden, line_logits
+
+
 class LyricsEncoder(nn.Module):
     def __init__(
         self,
@@ -341,8 +397,26 @@ class LyricsHeadAdapter(nn.Module):
         dropout=0.1,
         alignment_dim=256,
         alignment_temperature=0.1,
+        use_online_longformer=False,
+        longformer_model_path=None,
+        longformer_line_token="<LINE>",
+        longformer_train_top_layers=2,
+        longformer_freeze_embeddings=True,
     ):
         super().__init__()
+        self.use_online_longformer = bool(use_online_longformer)
+        self.online_longformer = None
+        if self.use_online_longformer:
+            if longformer_model_path is None:
+                raise ValueError("longformer_model_path is required for online lyrics mode")
+            self.online_longformer = OnlineLongformerLyricsEncoder(
+                model_path=longformer_model_path,
+                line_token=longformer_line_token,
+                num_labels=lyrics_logits_dim,
+                dropout=dropout,
+                train_top_layers=longformer_train_top_layers,
+                freeze_embeddings=longformer_freeze_embeddings,
+            )
         self.lyrics_encoder = LyricsEncoder(
             lyrics_input_dim=lyrics_input_dim,
             lyrics_logits_dim=lyrics_logits_dim,
@@ -402,6 +476,7 @@ class LyricsHeadAdapter(nn.Module):
             audio_states.new_zeros(batch, time_len, function_out),
             {
                 "loss_alignment": zero,
+                "loss_lyrics_line": zero,
                 "lyrics_song_coverage": zero.detach(),
                 "lyrics_frame_coverage": zero.detach(),
                 "boundary_gate_mean": zero.detach(),
@@ -456,6 +531,27 @@ class LyricsHeadAdapter(nn.Module):
         logits = logits.masked_fill(same_song & (~diagonal), -float("inf"))
         return F.cross_entropy(logits, torch.arange(logits.size(0), device=logits.device))
 
+    def _build_repeat_embeddings_from_lines(self, line_embeddings, line_masks, repeat_features):
+        batch, line_len, dim = line_embeddings.shape
+        repeat_embeddings = line_embeddings.new_zeros(batch, line_len, dim)
+        if line_len <= 1:
+            return repeat_embeddings
+        normalized = F.normalize(line_embeddings, dim=-1)
+        sims = normalized @ normalized.transpose(1, 2)
+        eye = torch.eye(line_len, device=line_embeddings.device, dtype=torch.bool).unsqueeze(0)
+        sims = sims.masked_fill(eye, -float("inf"))
+        if line_masks is not None:
+            invalid = line_masks.unsqueeze(1).expand(-1, line_len, -1)
+            sims = sims.masked_fill(invalid, -float("inf"))
+        weights = torch.relu(sims)
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        if repeat_features is not None and repeat_features.size(-1) > 2:
+            strength = repeat_features[..., 2:3].clamp(0.0, 1.0)
+        else:
+            strength = 1.0
+        repeat_embeddings = weights @ line_embeddings
+        return repeat_embeddings * strength
+
     def forward(
         self,
         audio_states,
@@ -469,6 +565,12 @@ class LyricsHeadAdapter(nn.Module):
         lyrics_frame_line_indices=None,
         lyrics_frame_active_masks=None,
         has_lyrics=None,
+        lyrics_input_ids=None,
+        lyrics_attention_mask=None,
+        lyrics_global_attention_mask=None,
+        lyrics_line_positions=None,
+        lyrics_line_text_masks=None,
+        lyrics_line_labels=None,
     ):
         if (
             lyrics_line_embeddings is None
@@ -524,6 +626,67 @@ class LyricsHeadAdapter(nn.Module):
         has_lyrics = has_lyrics.to(audio_states.device).float().view(batch, 1, 1)
         lyrics_frame_line_indices = lyrics_frame_line_indices.to(audio_states.device).long()
         lyrics_frame_active_masks = lyrics_frame_active_masks.to(audio_states.device).bool()
+
+        loss_lyrics_line = audio_states.new_zeros(())
+        if self.online_longformer is not None and lyrics_input_ids is not None:
+            if not isinstance(lyrics_input_ids, torch.Tensor):
+                lyrics_input_ids = torch.tensor(lyrics_input_ids, device=audio_states.device)
+            if not isinstance(lyrics_attention_mask, torch.Tensor):
+                lyrics_attention_mask = torch.tensor(lyrics_attention_mask, device=audio_states.device)
+            if not isinstance(lyrics_global_attention_mask, torch.Tensor):
+                lyrics_global_attention_mask = torch.tensor(
+                    lyrics_global_attention_mask, device=audio_states.device
+                )
+            if not isinstance(lyrics_line_positions, torch.Tensor):
+                lyrics_line_positions = torch.tensor(
+                    lyrics_line_positions, device=audio_states.device
+                )
+            if lyrics_line_text_masks is not None and not isinstance(lyrics_line_text_masks, torch.Tensor):
+                lyrics_line_text_masks = torch.tensor(
+                    lyrics_line_text_masks, device=audio_states.device
+                )
+            if lyrics_line_labels is not None and not isinstance(lyrics_line_labels, torch.Tensor):
+                lyrics_line_labels = torch.tensor(lyrics_line_labels, device=audio_states.device)
+
+            lyrics_input_ids = lyrics_input_ids.to(audio_states.device).long()
+            lyrics_attention_mask = lyrics_attention_mask.to(audio_states.device).long()
+            lyrics_global_attention_mask = lyrics_global_attention_mask.to(audio_states.device).long()
+            lyrics_line_positions = lyrics_line_positions.to(audio_states.device).long()
+            lyrics_line_text_masks = (
+                lyrics_line_text_masks.to(audio_states.device).bool()
+                if lyrics_line_text_masks is not None
+                else lyrics_line_masks
+            )
+
+            online_embeddings, online_logits = self.online_longformer(
+                input_ids=lyrics_input_ids,
+                attention_mask=lyrics_attention_mask,
+                global_attention_mask=lyrics_global_attention_mask,
+                line_positions=lyrics_line_positions,
+                line_masks=lyrics_line_text_masks,
+            )
+            online_line_len = online_embeddings.size(1)
+            lyrics_line_embeddings = online_embeddings
+            lyrics_line_logits = online_logits
+            lyrics_line_masks = lyrics_line_text_masks
+            lyrics_line_time_features = lyrics_line_time_features[:, :online_line_len]
+            lyrics_line_repeat_features = lyrics_line_repeat_features[:, :online_line_len]
+            lyrics_frame_line_indices = lyrics_frame_line_indices.clamp(
+                min=-1, max=max(online_line_len - 1, 0)
+            )
+            lyrics_line_repeat_embeddings = self._build_repeat_embeddings_from_lines(
+                lyrics_line_embeddings,
+                lyrics_line_masks,
+                lyrics_line_repeat_features,
+            )
+            if lyrics_line_labels is not None:
+                lyrics_line_labels = lyrics_line_labels.to(audio_states.device).long()[:, :online_line_len]
+                valid_labels = (lyrics_line_labels >= 0) & (~lyrics_line_masks)
+                if valid_labels.any():
+                    loss_lyrics_line = F.cross_entropy(
+                        lyrics_line_logits[valid_labels],
+                        lyrics_line_labels[valid_labels],
+                    )
 
         lyrics_memory = self.lyrics_encoder(
             lyrics_line_embeddings,
@@ -582,6 +745,7 @@ class LyricsHeadAdapter(nn.Module):
         active_count = active.sum().clamp_min(1.0)
         aux = {
             "loss_alignment": alignment_loss,
+            "loss_lyrics_line": loss_lyrics_line,
             "lyrics_song_coverage": has_lyrics.mean().detach(),
             "lyrics_frame_coverage": active.mean().detach(),
             "boundary_gate_mean": audio_states.new_zeros(()).detach(),
@@ -657,6 +821,15 @@ class Model(nn.Module):
         )
         self.lyrics_alignment_dim = getattr(config, "lyrics_alignment_dim", 256)
         self.lyrics_alignment_temperature = getattr(config, "lyrics_alignment_temperature", 0.1)
+        self.lyrics_use_raw_text = getattr(config, "lyrics_use_raw_text", False)
+        self.lyrics_longformer_model_path = getattr(config, "lyrics_longformer_model_path", None)
+        self.lyrics_line_token = getattr(config, "lyrics_line_token", "<LINE>")
+        self.lyrics_longformer_train_top_layers = getattr(
+            config, "lyrics_longformer_train_top_layers", 2
+        )
+        self.lyrics_longformer_freeze_embeddings = getattr(
+            config, "lyrics_longformer_freeze_embeddings", True
+        )
 
         if self.use_lyrics:
             self.lyrics_head_adapter = LyricsHeadAdapter(
@@ -674,6 +847,11 @@ class Model(nn.Module):
                 dropout=self.lyrics_dropout,
                 alignment_dim=self.lyrics_alignment_dim,
                 alignment_temperature=self.lyrics_alignment_temperature,
+                use_online_longformer=self.lyrics_use_raw_text,
+                longformer_model_path=self.lyrics_longformer_model_path,
+                longformer_line_token=self.lyrics_line_token,
+                longformer_train_top_layers=self.lyrics_longformer_train_top_layers,
+                longformer_freeze_embeddings=self.lyrics_longformer_freeze_embeddings,
             )
         else:
             self.lyrics_head_adapter = None
@@ -769,6 +947,12 @@ class Model(nn.Module):
         lyrics_frame_line_indices=None,
         lyrics_frame_active_masks=None,
         has_lyrics=None,
+        lyrics_input_ids=None,
+        lyrics_attention_mask=None,
+        lyrics_global_attention_mask=None,
+        lyrics_line_positions=None,
+        lyrics_line_text_masks=None,
+        lyrics_line_labels=None,
     ):
         if (not self.use_lyrics) or self.lyrics_head_adapter is None:
             return boundary_logits, function_logits, {}
@@ -799,6 +983,12 @@ class Model(nn.Module):
             lyrics_frame_line_indices=lyrics_frame_line_indices,
             lyrics_frame_active_masks=lyrics_frame_active_masks,
             has_lyrics=has_lyrics,
+            lyrics_input_ids=lyrics_input_ids,
+            lyrics_attention_mask=lyrics_attention_mask,
+            lyrics_global_attention_mask=lyrics_global_attention_mask,
+            lyrics_line_positions=lyrics_line_positions,
+            lyrics_line_text_masks=lyrics_line_text_masks,
+            lyrics_line_labels=lyrics_line_labels,
         )
         return boundary_logits + boundary_delta, function_logits + function_delta, lyrics_aux
 
@@ -857,6 +1047,12 @@ class Model(nn.Module):
         lyrics_frame_line_indices=None,
         lyrics_frame_active_masks=None,
         has_lyrics=None,
+        lyrics_input_ids=None,
+        lyrics_attention_mask=None,
+        lyrics_global_attention_mask=None,
+        lyrics_line_positions=None,
+        lyrics_line_text_masks=None,
+        lyrics_line_labels=None,
         prefix: str = None,
         with_logits=False,
     ):
@@ -889,6 +1085,12 @@ class Model(nn.Module):
                 lyrics_frame_line_indices=lyrics_frame_line_indices,
                 lyrics_frame_active_masks=lyrics_frame_active_masks,
                 has_lyrics=has_lyrics,
+                lyrics_input_ids=lyrics_input_ids,
+                lyrics_attention_mask=lyrics_attention_mask,
+                lyrics_global_attention_mask=lyrics_global_attention_mask,
+                lyrics_line_positions=lyrics_line_positions,
+                lyrics_line_text_masks=lyrics_line_text_masks,
+                lyrics_line_labels=lyrics_line_labels,
             )
 
             logits = {
@@ -957,12 +1159,18 @@ class Model(nn.Module):
             float(getattr(self.config, "lyrics_alignment_loss_weight", 0.0))
             * loss_alignment
         )
+        loss_lyrics_line = outputs.get("loss_lyrics_line", loss_section.new_zeros(()))
+        loss_lyrics_line_weighted = (
+            float(getattr(self.config, "lyrics_line_loss_weight", 0.0))
+            * loss_lyrics_line
+        )
 
         if self.config.learn_label:
             loss += loss_function
         if self.config.learn_segment:
             loss += loss_section
         loss += loss_alignment_weighted
+        loss += loss_lyrics_line_weighted
 
         losses.update(
             loss=loss,
@@ -970,6 +1178,8 @@ class Model(nn.Module):
             loss_function=loss_function,
             loss_alignment=loss_alignment,
             loss_alignment_weighted=loss_alignment_weighted,
+            loss_lyrics_line=loss_lyrics_line,
+            loss_lyrics_line_weighted=loss_lyrics_line_weighted,
         )
         for key in [
             "lyrics_song_coverage",
@@ -1013,6 +1223,12 @@ class Model(nn.Module):
             lyrics_frame_line_indices=batch.get("lyrics_frame_line_indices", None),
             lyrics_frame_active_masks=batch.get("lyrics_frame_active_masks", None),
             has_lyrics=batch.get("has_lyrics", None),
+            lyrics_input_ids=batch.get("lyrics_input_ids", None),
+            lyrics_attention_mask=batch.get("lyrics_attention_mask", None),
+            lyrics_global_attention_mask=batch.get("lyrics_global_attention_mask", None),
+            lyrics_line_positions=batch.get("lyrics_line_positions", None),
+            lyrics_line_text_masks=batch.get("lyrics_line_text_masks", None),
+            lyrics_line_labels=batch.get("lyrics_line_labels", None),
         )
 
         logits = {
