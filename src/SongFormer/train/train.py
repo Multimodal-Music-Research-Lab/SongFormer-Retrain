@@ -251,6 +251,17 @@ def append_training_loss_log(log_path: str, row: dict):
         "loss_total",
         "loss_section",
         "loss_function",
+        "loss_function_fused",
+        "loss_audio_function",
+        "loss_audio_function_weighted",
+        "loss_alignment",
+        "loss_alignment_weighted",
+        "loss_lyrics_line",
+        "loss_lyrics_line_weighted",
+        "lyrics_song_coverage",
+        "lyrics_frame_coverage",
+        "lyrics_fusion_alpha",
+        "function_delta_abs",
         "learning_rate",
     ]
     exists = os.path.exists(log_path) and os.path.getsize(log_path) > 0
@@ -311,7 +322,7 @@ def main(args, hparams):
 
     num_params = 0
     for param in params:
-        num_params += torch.prod(torch.tensor(param.size()))
+        num_params += param.numel()
 
     train_dataset = hydra.utils.instantiate(hparams.train_dataset)
     eval_dataset = hydra.utils.instantiate(hparams.eval_dataset)
@@ -456,6 +467,17 @@ def main(args, hparams):
                                     "loss_total": float(loss.item()),
                                     "loss_section": float(losses["loss_section"].item()),
                                     "loss_function": float(losses["loss_function"].item()),
+                                    "loss_function_fused": float(losses.get("loss_function_fused", torch.tensor(0.0)).item()),
+                                    "loss_audio_function": float(losses.get("loss_audio_function", torch.tensor(0.0)).item()),
+                                    "loss_audio_function_weighted": float(losses.get("loss_audio_function_weighted", torch.tensor(0.0)).item()),
+                                    "loss_alignment": float(losses.get("loss_alignment", torch.tensor(0.0)).item()),
+                                    "loss_alignment_weighted": float(losses.get("loss_alignment_weighted", torch.tensor(0.0)).item()),
+                                    "loss_lyrics_line": float(losses.get("loss_lyrics_line", torch.tensor(0.0)).item()),
+                                    "loss_lyrics_line_weighted": float(losses.get("loss_lyrics_line_weighted", torch.tensor(0.0)).item()),
+                                    "lyrics_song_coverage": float(losses.get("lyrics_song_coverage", torch.tensor(0.0)).item()),
+                                    "lyrics_frame_coverage": float(losses.get("lyrics_frame_coverage", torch.tensor(0.0)).item()),
+                                    "lyrics_fusion_alpha": float(losses.get("lyrics_fusion_alpha", torch.tensor(0.0)).item()),
+                                    "function_delta_abs": float(losses.get("function_delta_abs", torch.tensor(0.0)).item()),
                                     "learning_rate": float(learning_rate),
                                 },
                             )

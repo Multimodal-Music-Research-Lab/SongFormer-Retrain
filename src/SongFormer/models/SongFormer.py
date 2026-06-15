@@ -380,6 +380,53 @@ class LyricsEncoder(nn.Module):
         return self.encoder(memory, src_key_padding_mask=line_masks)
 
 
+class LyricsFusionSequenceBlock(nn.Module):
+    """ALMA-style long-context fusion block.
+
+    Uses Mamba2 when mamba_ssm is installed and requested; otherwise falls back
+    to the existing x-transformers encoder so the experiment remains runnable in
+    the current SongFormer environment.
+    """
+
+    def __init__(self, dim, num_layers, num_heads, dropout=0.1, block_type="transformer"):
+        super().__init__()
+        self.block_type = str(block_type).lower()
+        self.blocks = nn.ModuleList()
+        if self.block_type == "mamba2":
+            try:
+                from mamba_ssm import Mamba2
+            except Exception as exc:
+                raise ImportError(
+                    "lyrics_fusion_block_type=mamba2 requires mamba_ssm to be installed"
+                ) from exc
+            for _ in range(max(1, num_layers)):
+                self.blocks.append(
+                    nn.Sequential(
+                        nn.LayerNorm(dim),
+                        Mamba2(d_model=dim, d_state=64, d_conv=4, expand=2),
+                        nn.Dropout(dropout),
+                    )
+                )
+        else:
+            self.blocks.append(
+                WrapedTransformerEncoder(
+                    input_dim=dim,
+                    transformer_input_dim=dim,
+                    num_layers=max(1, num_layers),
+                    nhead=num_heads,
+                    dropout=dropout,
+                )
+            )
+
+    def forward(self, x, src_key_padding_mask=None):
+        if self.block_type == "mamba2":
+            for block in self.blocks:
+                residual = x
+                x = residual + block(x)
+            return x
+        return self.blocks[0](x, src_key_padding_mask=src_key_padding_mask)
+
+
 class LyricsHeadAdapter(nn.Module):
     def __init__(
         self,
@@ -397,6 +444,8 @@ class LyricsHeadAdapter(nn.Module):
         dropout=0.1,
         alignment_dim=256,
         alignment_temperature=0.1,
+        fusion_block_type="transformer",
+        fusion_alpha_init=0.0,
         use_online_longformer=False,
         longformer_model_path=None,
         longformer_line_token="<LINE>",
@@ -447,41 +496,46 @@ class LyricsHeadAdapter(nn.Module):
             nn.GELU(),
             nn.Dropout(dropout),
         )
-        self.fusion_block = WrapedTransformerEncoder(
-            input_dim=audio_dim,
-            transformer_input_dim=audio_dim,
+        self.fusion_block = LyricsFusionSequenceBlock(
+            dim=audio_dim,
             num_layers=max(1, num_layers),
-            nhead=num_heads,
+            num_heads=num_heads,
             dropout=dropout,
+            block_type=fusion_block_type,
         )
-        self.function_delta_head = nn.Sequential(
+        self.fused_function_head = nn.Sequential(
             nn.Linear(audio_dim, adapter_hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(adapter_hidden_dim, num_classes),
         )
-        self.function_gate = nn.Linear(fused_dim, 1)
+        alpha_init = float(fusion_alpha_init)
+        if alpha_init <= 0.0:
+            alpha_logit = -6.0
+        elif alpha_init >= 1.0:
+            alpha_logit = 6.0
+        else:
+            alpha_logit = float(torch.logit(torch.tensor(alpha_init)))
+        self.fusion_alpha_logit = nn.Parameter(torch.tensor(alpha_logit, dtype=torch.float32))
         self.audio_alignment_proj = nn.Linear(audio_dim, alignment_dim)
         self.lyrics_alignment_proj = nn.Linear(hidden_dim, alignment_dim)
-        nn.init.normal_(self.function_delta_head[-1].weight, mean=0.0, std=0.01)
-        nn.init.zeros_(self.function_delta_head[-1].bias)
-        nn.init.zeros_(self.function_gate.bias)
+        nn.init.normal_(self.fused_function_head[-1].weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.fused_function_head[-1].bias)
 
-    def _zero_outputs(self, audio_states):
+    def _zero_outputs(self, audio_states, audio_function_logits=None):
         batch, time_len, _ = audio_states.shape
-        function_out = self.function_delta_head[-1].out_features
+        if audio_function_logits is None:
+            function_out = self.fused_function_head[-1].out_features
+            audio_function_logits = audio_states.new_zeros(batch, time_len, function_out)
         zero = audio_states.sum() * 0.0
         return (
-            audio_states.new_zeros(batch, time_len),
-            audio_states.new_zeros(batch, time_len, function_out),
+            audio_function_logits,
             {
                 "loss_alignment": zero,
                 "loss_lyrics_line": zero,
                 "lyrics_song_coverage": zero.detach(),
                 "lyrics_frame_coverage": zero.detach(),
-                "boundary_gate_mean": zero.detach(),
-                "function_gate_mean": zero.detach(),
-                "boundary_delta_abs": zero.detach(),
+                "lyrics_fusion_alpha": torch.sigmoid(self.fusion_alpha_logit).detach(),
                 "function_delta_abs": zero.detach(),
             },
         )
@@ -555,6 +609,7 @@ class LyricsHeadAdapter(nn.Module):
     def forward(
         self,
         audio_states,
+        audio_function_logits,
         lyrics_line_embeddings=None,
         lyrics_line_logits=None,
         lyrics_line_time_features=None,
@@ -581,7 +636,7 @@ class LyricsHeadAdapter(nn.Module):
             or lyrics_frame_line_indices is None
             or lyrics_frame_active_masks is None
         ):
-            return self._zero_outputs(audio_states)
+            return self._zero_outputs(audio_states, audio_function_logits)
 
         if not isinstance(lyrics_line_embeddings, torch.Tensor):
             lyrics_line_embeddings = torch.tensor(lyrics_line_embeddings, device=audio_states.device)
@@ -730,10 +785,12 @@ class LyricsHeadAdapter(nn.Module):
             [audio_states, lyrics_timeline, line_logits_context, frame_context, audio_states * lyrics_timeline],
             dim=-1,
         )
-        function_gate = torch.sigmoid(self.function_gate(fused)) * active
+        fusion_alpha = torch.sigmoid(self.fusion_alpha_logit)
         fusion_states = self.fusion_block(self.fusion_input_proj(fused), src_key_padding_mask=None)
-        boundary_delta = audio_states.new_zeros(batch, time_len)
-        function_delta = self.function_delta_head(fusion_states) * function_gate
+        fused_function_logits = self.fused_function_head(fusion_states)
+        mix = fusion_alpha * active
+        function_logits = audio_function_logits + mix * (fused_function_logits - audio_function_logits)
+        function_delta = function_logits - audio_function_logits
         alignment_loss = self._compute_alignment_loss(
             audio_states=audio_states,
             lyrics_memory=lyrics_memory,
@@ -748,12 +805,10 @@ class LyricsHeadAdapter(nn.Module):
             "loss_lyrics_line": loss_lyrics_line,
             "lyrics_song_coverage": has_lyrics.mean().detach(),
             "lyrics_frame_coverage": active.mean().detach(),
-            "boundary_gate_mean": audio_states.new_zeros(()).detach(),
-            "function_gate_mean": (function_gate.sum() / active_count).detach(),
-            "boundary_delta_abs": boundary_delta.abs().mean().detach(),
+            "lyrics_fusion_alpha": fusion_alpha.detach(),
             "function_delta_abs": function_delta.abs().mean().detach(),
         }
-        return boundary_delta, function_delta, aux
+        return function_logits, aux
 
 
 class Model(nn.Module):
@@ -821,6 +876,8 @@ class Model(nn.Module):
         )
         self.lyrics_alignment_dim = getattr(config, "lyrics_alignment_dim", 256)
         self.lyrics_alignment_temperature = getattr(config, "lyrics_alignment_temperature", 0.1)
+        self.lyrics_fusion_block_type = getattr(config, "lyrics_fusion_block_type", "transformer")
+        self.lyrics_fusion_alpha_init = getattr(config, "lyrics_fusion_alpha_init", 0.0)
         self.lyrics_use_raw_text = getattr(config, "lyrics_use_raw_text", False)
         self.lyrics_longformer_model_path = getattr(config, "lyrics_longformer_model_path", None)
         self.lyrics_line_token = getattr(config, "lyrics_line_token", "<LINE>")
@@ -847,6 +904,8 @@ class Model(nn.Module):
                 dropout=self.lyrics_dropout,
                 alignment_dim=self.lyrics_alignment_dim,
                 alignment_temperature=self.lyrics_alignment_temperature,
+                fusion_block_type=self.lyrics_fusion_block_type,
+                fusion_alpha_init=self.lyrics_fusion_alpha_init,
                 use_online_longformer=self.lyrics_use_raw_text,
                 longformer_model_path=self.lyrics_longformer_model_path,
                 longformer_line_token=self.lyrics_line_token,
@@ -955,7 +1014,7 @@ class Model(nn.Module):
         lyrics_line_labels=None,
     ):
         if (not self.use_lyrics) or self.lyrics_head_adapter is None:
-            return boundary_logits, function_logits, {}
+            return boundary_logits, function_logits, {"audio_function_logits": function_logits}
 
         if has_lyrics is not None and not isinstance(has_lyrics, torch.Tensor):
             has_lyrics = torch.tensor(has_lyrics, device=audio_states.device)
@@ -971,8 +1030,9 @@ class Model(nn.Module):
             ).float()
             has_lyrics = has_lyrics * keep
 
-        boundary_delta, function_delta, lyrics_aux = self.lyrics_head_adapter(
+        fused_function_logits, lyrics_aux = self.lyrics_head_adapter(
             audio_states=audio_states,
+            audio_function_logits=function_logits,
             lyrics_line_embeddings=lyrics_line_embeddings,
             lyrics_line_logits=lyrics_line_logits,
             lyrics_line_time_features=lyrics_line_time_features,
@@ -990,7 +1050,8 @@ class Model(nn.Module):
             lyrics_line_text_masks=lyrics_line_text_masks,
             lyrics_line_labels=lyrics_line_labels,
         )
-        return boundary_logits + boundary_delta, function_logits + function_delta, lyrics_aux
+        lyrics_aux["audio_function_logits"] = function_logits
+        return boundary_logits, fused_function_logits, lyrics_aux
 
     def infer_with_metrics(self, batch, prefix: str = None):
         with torch.no_grad():
@@ -1135,6 +1196,18 @@ class Model(nn.Module):
             pred=outputs["function_logits"], targets=batch["true_functions"]
         )
         loss_function += ttt
+        audio_function_logits = outputs.get("audio_function_logits", None)
+        loss_audio_function = loss_section.new_zeros(())
+        if audio_function_logits is not None:
+            loss_audio_function = F.cross_entropy(
+                audio_function_logits.transpose(1, 2),
+                batch["true_functions"].transpose(1, 2),
+                reduction="none",
+            )
+            loss_audio_function += self.config.label_focal_loss_weight * self.label_focal_loss(
+                pred=audio_function_logits,
+                targets=batch["true_functions"],
+            )
 
         float_masks = (~batch["masks"]).float()
         boundary_mask = batch.get("boundary_mask", None)
@@ -1151,9 +1224,18 @@ class Model(nn.Module):
 
         loss_section = torch.mean(boundary_mask * float_masks * loss_section)
         loss_function = torch.mean(function_mask * float_masks * loss_function)
+        if audio_function_logits is not None:
+            loss_audio_function = torch.mean(function_mask * float_masks * loss_audio_function)
 
         loss_section *= self.config.loss_weight_section
         loss_function *= self.config.loss_weight_function
+        loss_function_fused = loss_function
+        loss_audio_function *= self.config.loss_weight_function
+        loss_audio_function_weighted = (
+            float(getattr(self.config, "audio_function_aux_loss_weight", 0.0))
+            * loss_audio_function
+        )
+        loss_function = loss_function_fused + loss_audio_function_weighted
         loss_alignment = outputs.get("loss_alignment", loss_section.new_zeros(()))
         loss_alignment_weighted = (
             float(getattr(self.config, "lyrics_alignment_loss_weight", 0.0))
@@ -1176,6 +1258,9 @@ class Model(nn.Module):
             loss=loss,
             loss_section=loss_section,
             loss_function=loss_function,
+            loss_function_fused=loss_function_fused,
+            loss_audio_function=loss_audio_function,
+            loss_audio_function_weighted=loss_audio_function_weighted,
             loss_alignment=loss_alignment,
             loss_alignment_weighted=loss_alignment_weighted,
             loss_lyrics_line=loss_lyrics_line,
@@ -1184,9 +1269,7 @@ class Model(nn.Module):
         for key in [
             "lyrics_song_coverage",
             "lyrics_frame_coverage",
-            "boundary_gate_mean",
-            "function_gate_mean",
-            "boundary_delta_abs",
+            "lyrics_fusion_alpha",
             "function_delta_abs",
         ]:
             if key in outputs:
