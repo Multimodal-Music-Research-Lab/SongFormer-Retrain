@@ -383,7 +383,7 @@ class LyricsEncoder(nn.Module):
 class LyricsFusionSequenceBlock(nn.Module):
     """ALMA-style long-context fusion block.
 
-    Uses Mamba2 when mamba_ssm is installed and requested; otherwise falls back
+    Uses Mamba/Mamba2 when mamba_ssm is installed and requested; otherwise falls back
     to the existing x-transformers encoder so the experiment remains runnable in
     the current SongFormer environment.
     """
@@ -392,7 +392,22 @@ class LyricsFusionSequenceBlock(nn.Module):
         super().__init__()
         self.block_type = str(block_type).lower()
         self.blocks = nn.ModuleList()
-        if self.block_type == "mamba2":
+        if self.block_type in {"mamba", "mamba1"}:
+            try:
+                from mamba_ssm import Mamba
+            except Exception as exc:
+                raise ImportError(
+                    "lyrics_fusion_block_type=mamba requires mamba_ssm to be installed"
+                ) from exc
+            for _ in range(max(1, num_layers)):
+                self.blocks.append(
+                    nn.Sequential(
+                        nn.LayerNorm(dim),
+                        Mamba(d_model=dim, d_state=64, d_conv=4, expand=2),
+                        nn.Dropout(dropout),
+                    )
+                )
+        elif self.block_type == "mamba2":
             try:
                 from mamba_ssm import Mamba2
             except Exception as exc:
@@ -419,7 +434,7 @@ class LyricsFusionSequenceBlock(nn.Module):
             )
 
     def forward(self, x, src_key_padding_mask=None):
-        if self.block_type == "mamba2":
+        if self.block_type in {"mamba", "mamba1", "mamba2"}:
             for block in self.blocks:
                 residual = x
                 x = residual + block(x)

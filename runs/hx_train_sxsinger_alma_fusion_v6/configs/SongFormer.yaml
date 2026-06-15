@@ -31,7 +31,7 @@ lyrics_adapter_hidden_dim: 512
 lyrics_alignment_dim: 256
 lyrics_alignment_temperature: 0.1
 lyrics_alignment_loss_weight: 0.02
-lyrics_fusion_block_type: transformer
+lyrics_fusion_block_type: mamba
 lyrics_fusion_alpha_init: 0.0
 audio_function_aux_loss_weight: 0.5
 lyrics_use_raw_text: true
