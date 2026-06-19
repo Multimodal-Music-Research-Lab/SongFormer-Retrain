@@ -262,6 +262,7 @@ def append_training_loss_log(log_path: str, row: dict):
         "lyrics_frame_coverage",
         "lyrics_fusion_alpha",
         "function_delta_abs",
+        "lyrics_alignment_pairs",
         "learning_rate",
     ]
     exists = os.path.exists(log_path) and os.path.getsize(log_path) > 0
@@ -478,6 +479,7 @@ def main(args, hparams):
                                     "lyrics_frame_coverage": float(losses.get("lyrics_frame_coverage", torch.tensor(0.0)).item()),
                                     "lyrics_fusion_alpha": float(losses.get("lyrics_fusion_alpha", torch.tensor(0.0)).item()),
                                     "function_delta_abs": float(losses.get("function_delta_abs", torch.tensor(0.0)).item()),
+                                    "lyrics_alignment_pairs": float(losses.get("lyrics_alignment_pairs", torch.tensor(0.0)).item()),
                                     "learning_rate": float(learning_rate),
                                 },
                             )
