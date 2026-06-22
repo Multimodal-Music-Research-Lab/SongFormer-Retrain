@@ -1,0 +1,258 @@
+﻿# ============================
+# Model Configuration
+# ============================
+
+input_dim_raw: 4096
+input_dim: 2048
+
+# ============================
+# [ADDED FOR ALMA-ALIGNED LYRICS FUSION V8]
+# SongFormer audio backbone and boundary head remain audio-only.
+# A SongGen-Conformer trainable token encoder encodes SoulX lyrics; line timestamps
+# are interpolated only onto SoulX-active lyric frames. The resulting audio-lyrics
+# joint sequence is processed by Mamba only for function/segment prediction.
+# ============================
+use_lyrics: true
+lyrics_input_dim: 512
+lyrics_logits_dim: 8
+lyrics_time_feat_dim: 8
+lyrics_frame_time_feat_dim: 6
+lyrics_repeat_feat_dim: 4
+lyrics_context_window_sec: 30.0
+lyrics_repeat_top_k: 3
+lyrics_repeat_exclude_neighbors: 2
+lyrics_repeat_similarity_threshold: 0.8
+lyrics_dropout: 0.1
+lyrics_condition_dropout: 0.1
+lyrics_encoder_hidden_dim: 512
+lyrics_encoder_layers: 2
+lyrics_attn_num_heads: 8
+lyrics_adapter_hidden_dim: 512
+lyrics_alignment_dim: 256
+lyrics_alignment_temperature: 0.1
+lyrics_alignment_loss_weight: 0.05
+lyrics_fusion_block_type: mamba
+lyrics_fusion_alpha_init: 1.0
+lyrics_fusion_use_gate: false
+lyrics_fusion_residual_scale: 1.0
+audio_function_aux_loss_weight: 0.5
+lyrics_use_raw_text: true
+lyrics_text_encoder_type: songgen
+lyrics_songgen_hidden_dim: 512
+lyrics_songgen_layers: 6
+lyrics_songgen_ffn_dim: 2048
+lyrics_songgen_max_positions: 2048
+lyrics_longformer_model_path: /home/hbli/songformer/repo/SongFormer/src/third_party/text_models/allenai_longformer-base-4096
+lyrics_line_token: "<LINE>"
+lyrics_longformer_max_length: 2048
+lyrics_longformer_line_max_length: 64
+lyrics_longformer_train_top_layers: 2
+lyrics_longformer_freeze_embeddings: true
+lyrics_line_loss_weight: 0.05
+
+# Downsampling Module
+down_sample_conv_kernel_size: 3
+down_sample_conv_stride: 3
+down_sample_conv_dropout: 0.1
+down_sample_conv_padding: 0
+
+# Transformer Module
+transformer_encoder_input_dim: 1024
+transformer_input_dim: 512
+num_transformer_layers: 4
+transformer_nhead: 8
+transformer_dropout: 0.1
+
+# task-specific heads
+boundary_head_hidden_dims: [128, 64, 8]
+function_head_hidden_dims: []
+
+num_classes: 128
+num_dataset_classes: 64
+
+# scheduler
+warmup_steps: 1200
+total_steps: 48040
+warmup_max_lr: 0.0001
+
+# frame rates after downsampling
+output_logits_frame_rates: 8.333
+downsample_rates: 3
+frame_rates: 8.333
+
+# ema config
+ema_kwargs:
+  { update_after_step: 200 }
+
+# ============================
+# Loss Functions configuration
+# ============================
+
+# Focal loss
+label_focal_loss_weight: 0.2
+label_focal_loss_alpha: 0.25
+label_focal_loss_gamma: 2.0
+
+# Boundary TV loss
+boundary_tvloss_weight: 0.05
+boundary_tv_loss_beta: 0.6
+boundary_tv_loss_lambda: 0.4
+boundary_tv_loss_boundary_threshold: 0.01
+boundary_tv_loss_reduction_weight: 0.1
+
+loss_weight_section: 0.2
+loss_weight_function: 0.8
+
+# ============================
+# Training config
+# ============================
+
+num_neighbors: 10
+learn_label: true
+learn_segment: true
+accumulation_steps: 4
+slice_dur: 420
+early_stopping_step: 3
+local_maxima_filter_size: 3
+
+# ============================
+# Dataset config
+# ============================
+
+train_dataset:
+  _target_: dataset.SongFormerDataset.Dataset
+  dataset_abstracts:
+    [
+      # ====== HX train======
+      {
+        "internal_tmp_id": "SongForm-HX-8Class",
+        "dataset_type": "SongForm-HX-8Class",
+        "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/420s/layer_10",
+        "lyrics_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_hook_mask_v1/results/songformer_line_features/train",
+        "lyrics_json_dir": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/soulxsinger_lyrics",
+        "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl",
+        "split_ids_path": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/train_hx.txt",
+        "multiplier": 4
+      },
+
+      # ====== HookTheory train======
+      {
+        "internal_tmp_id": "HookTheoryV3-8Class_train",
+        "dataset_type": "HookTheoryV1-8Class",
+        "adapter": "HookTheoryV1Adapter",
+        "structure_jsonl_paths": [
+          "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/HookTheoryV3_for_model.jsonl"
+        ],
+        "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/muq/420s/layer_10",
+        "lyrics_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_hook_mask_v1/results/songformer_line_features/train",
+        "lyrics_json_dir": "/mnt/ssd/hbli/songformer/runs/soulxsinger_lyrics/hooktheory",
+        "split_ids_path": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/train_hook.txt",
+        "multiplier": 4
+      }
+    ]
+  hparams:
+    output_logits_frame_rates: ${output_logits_frame_rates}
+    downsample_rates: ${downsample_rates}
+    num_neighbors: ${num_neighbors}
+    input_dim: ${input_dim_raw}
+    slice_dur: ${slice_dur}
+    num_classes: ${num_classes}
+    frame_rates: ${frame_rates}
+    # [ADDED FOR LYRICS]
+    use_lyrics: ${use_lyrics}
+    lyrics_input_dim: ${lyrics_input_dim}
+    lyrics_logits_dim: ${lyrics_logits_dim}
+    lyrics_time_feat_dim: ${lyrics_time_feat_dim}
+    lyrics_frame_time_feat_dim: ${lyrics_frame_time_feat_dim}
+    lyrics_repeat_feat_dim: ${lyrics_repeat_feat_dim}
+    lyrics_context_window_sec: ${lyrics_context_window_sec}
+    lyrics_repeat_top_k: ${lyrics_repeat_top_k}
+    lyrics_repeat_exclude_neighbors: ${lyrics_repeat_exclude_neighbors}
+    lyrics_repeat_similarity_threshold: ${lyrics_repeat_similarity_threshold}
+    lyrics_use_raw_text: ${lyrics_use_raw_text}
+    lyrics_longformer_model_path: ${lyrics_longformer_model_path}
+    lyrics_line_token: ${lyrics_line_token}
+    lyrics_longformer_max_length: ${lyrics_longformer_max_length}
+    lyrics_longformer_line_max_length: ${lyrics_longformer_line_max_length}
+
+# ===== eval (keep original HX val 200) =====
+eval_dataset:
+  _target_: dataset.SongFormerDataset.Dataset
+  dataset_abstracts:
+    [
+      {
+        "internal_tmp_id": "SongForm-HX-8Classs_val",
+        "dataset_type": "SongForm-HX-8Class",
+        "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/420s/layer_10",
+        "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl",
+        "split_ids_path": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/val.txt",
+        "lyrics_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_longformer_probe_hook_mask_v1/results/songformer_line_features/val",
+        "lyrics_json_dir": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/soulxsinger_lyrics",
+        "multiplier": 1
+      }
+    ]
+  hparams:
+    output_logits_frame_rates: ${output_logits_frame_rates}
+    downsample_rates: ${downsample_rates}
+    num_neighbors: ${num_neighbors}
+    input_dim: ${input_dim_raw}
+    slice_dur: ${slice_dur}
+    num_classes: ${num_classes}
+    frame_rates: ${frame_rates}
+    # [ADDED FOR LYRICS]
+    use_lyrics: ${use_lyrics}
+    lyrics_input_dim: ${lyrics_input_dim}
+    lyrics_logits_dim: ${lyrics_logits_dim}
+    lyrics_time_feat_dim: ${lyrics_time_feat_dim}
+    lyrics_frame_time_feat_dim: ${lyrics_frame_time_feat_dim}
+    lyrics_repeat_feat_dim: ${lyrics_repeat_feat_dim}
+    lyrics_context_window_sec: ${lyrics_context_window_sec}
+    lyrics_repeat_top_k: ${lyrics_repeat_top_k}
+    lyrics_repeat_exclude_neighbors: ${lyrics_repeat_exclude_neighbors}
+    lyrics_repeat_similarity_threshold: ${lyrics_repeat_similarity_threshold}
+    lyrics_use_raw_text: ${lyrics_use_raw_text}
+    lyrics_longformer_model_path: ${lyrics_longformer_model_path}
+    lyrics_line_token: ${lyrics_line_token}
+    lyrics_longformer_max_length: ${lyrics_longformer_max_length}
+    lyrics_longformer_line_max_length: ${lyrics_longformer_line_max_length}
+# ============================
+# DataLoader configuration
+# ============================
+
+train_dataloader:
+  num_workers: 4
+  batch_size: 2
+  pin_memory: True
+  prefetch_factor: 2
+  drop_last: True
+  persistent_workers: True
+  shuffle: true
+
+eval_dataloader:
+  num_workers: 0
+  batch_size: 1
+  shuffle: false
+
+# ============================
+# Optimizer configuration
+# ============================
+
+optimizer:
+  lr: ${warmup_max_lr}
+  betas: [0.8, 0.999]
+  eps: 1e-08
+  weight_decay: 3e-7
+
+# ============================
+# Training Run configuration
+# ============================
+
+args:
+  run_name: hx_train_sxsinger_alma_fusion_v8
+  model_name: SongFormer
+  save_interval: 3200
+  eval_interval: 3200
+  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_alma_fusion_v8/results/train_output
+  max_epochs: 1000
+  max_steps: 48040
+  tags: null
