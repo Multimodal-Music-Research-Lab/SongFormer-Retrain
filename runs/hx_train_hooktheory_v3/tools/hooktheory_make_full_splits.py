@@ -47,6 +47,36 @@ def collect_measure_sec_counts(section_dir: Path, sec_ext: str) -> Dict[str, int
     return dict(counts)
 
 
+def ssl_base_from_stem(stem: str) -> str:
+    parts = stem.split("_")
+    return "_".join(parts[:-1]) if parts and parts[-1].isdigit() else stem
+
+
+def collect_common_ssl_bases(ssl_dirs: List[str]) -> Set[str]:
+    common: Set[str] | None = None
+    for ssl_dir in ssl_dirs:
+        p = Path(ssl_dir)
+        bases = {ssl_base_from_stem(x.stem) for x in p.glob("*.npy")}
+        common = bases if common is None else common.intersection(bases)
+    return common if common is not None else set()
+
+
+def choose_representative_audio(
+    key: str,
+    variants: List[Path],
+    current_train_id_set: Set[str],
+    ssl_bases: Set[str] | None,
+) -> Path:
+    for audio_path in variants:
+        if audio_path.stem in current_train_id_set:
+            return audio_path
+    if ssl_bases:
+        for audio_path in variants:
+            if audio_path.stem in ssl_bases:
+                return audio_path
+    return variants[0]
+
+
 def write_scp(path: Path, audio_paths: Iterable[Path]) -> None:
     audio_paths = list(audio_paths)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,6 +111,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--audio_ext", type=str, default=".mp3")
     p.add_argument("--sec_ext", type=str, default=".sec")
     p.add_argument("--prefix", type=str, default="hooktheory")
+    p.add_argument(
+        "--ssl_dirs",
+        nargs="*",
+        default=None,
+        help="Optional SSL npy dirs. Representatives are chosen from stems available in every dir.",
+    )
     return p.parse_args()
 
 
@@ -93,6 +129,7 @@ def main() -> None:
 
     by_key = collect_audio_variants(audio_dir, args.audio_ext)
     sec_counts = collect_measure_sec_counts(section_dir, args.sec_ext)
+    common_ssl_bases = collect_common_ssl_bases(args.ssl_dirs or []) if args.ssl_dirs else None
 
     current_train_ids = read_ids(Path(args.current_train_ids))
     current_train_id_set: Set[str] = set(current_train_ids)
@@ -104,11 +141,7 @@ def main() -> None:
     if len(train_keys) != len(current_train_ids):
         raise ValueError("current_train_ids contains duplicate <artist>_<title> keys")
 
-    audio_stem_to_path = {
-        audio_path.stem: audio_path
-        for variants in by_key.values()
-        for audio_path in variants
-    }
+    audio_stem_to_path = {audio_path.stem: audio_path for variants in by_key.values() for audio_path in variants}
     missing_train_ids = sorted(current_train_id_set - set(audio_stem_to_path))
     if missing_train_ids:
         raise FileNotFoundError(
@@ -118,8 +151,12 @@ def main() -> None:
 
     all_keys = set(by_key)
     test_keys = sorted(all_keys - train_keys)
-    train_paths = [audio_stem_to_path[stem] for stem in sorted(current_train_id_set)]
-    test_paths = [by_key[key][0] for key in test_keys]
+    representative_by_key = {
+        key: choose_representative_audio(key, variants, current_train_id_set, common_ssl_bases)
+        for key, variants in by_key.items()
+    }
+    train_paths = [representative_by_key[key] for key in sorted(train_keys)]
+    test_paths = [representative_by_key[key] for key in test_keys]
     all_paths = train_paths + test_paths
 
     train_scp = out_dir / f"{args.prefix}_train_unique_9010.scp"
@@ -150,7 +187,7 @@ def main() -> None:
         writer.writeheader()
         for key in sorted(all_keys):
             split = "train" if key in train_keys else "test"
-            rep_path = audio_stem_to_path[train_key_to_stem[key]] if split == "train" else by_key[key][0]
+            rep_path = representative_by_key[key]
             writer.writerow(
                 {
                     "song_key": key,
@@ -163,6 +200,9 @@ def main() -> None:
             )
 
     no_measure_keys = sorted(key for key in all_keys if sec_counts.get(key, 0) == 0)
+    missing_ssl_rep_keys = []
+    if common_ssl_bases is not None:
+        missing_ssl_rep_keys = sorted(key for key, p in representative_by_key.items() if p.stem not in common_ssl_bases)
 
     print("=== HookTheory full split generation done ===")
     print(f"audio_dir:      {audio_dir}")
@@ -174,6 +214,11 @@ def main() -> None:
     print(f"audio variants: {sum(len(v) for v in by_key.values())}")
     print(f"measure secs:   {sum(sec_counts.values())}")
     print(f"keys without measure sec: {len(no_measure_keys)}")
+    if common_ssl_bases is not None:
+        print(f"common SSL exact bases: {len(common_ssl_bases)}")
+        print(f"representatives missing common SSL: {len(missing_ssl_rep_keys)}")
+        if missing_ssl_rep_keys:
+            print(f"first missing SSL representatives: {missing_ssl_rep_keys[:10]}")
     if no_measure_keys:
         print(f"first missing measure keys: {no_measure_keys[:10]}")
     print(f"train_scp:      {train_scp}")
