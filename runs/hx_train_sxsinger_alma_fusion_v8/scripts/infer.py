@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import argparse
@@ -1131,8 +1131,8 @@ def inference(rank, queue_input: mp.Queue, queue_output: mp.Queue, args):
                                 .unsqueeze(0)
                             )
 
-                    dataset_label = DATASET_LABEL
-                    dataset_ids = torch.Tensor(DATASET_IDS).to(device, dtype=torch.long)
+                    dataset_label = getattr(args, "dataset_label", DATASET_LABEL)
+                    dataset_ids = torch.Tensor(getattr(args, "dataset_ids", DATASET_IDS)).to(device, dtype=torch.long)
 
                     msa_info, chunk_logits = model.infer(
                         input_embeddings=embd,
@@ -1327,6 +1327,13 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=True, help="Model name under models/")
     parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint path (.pt). Absolute path OK.")
     parser.add_argument("--config_path", type=str, required=True, help="Config yaml path. Absolute path OK.")
+    parser.add_argument("--dataset_label", type=str, default=DATASET_LABEL, help="Dataset label for inference mask.")
+    parser.add_argument(
+        "--dataset_ids",
+        type=str,
+        default=",".join(str(x) for x in DATASET_IDS),
+        help="Comma- or space-separated dataset ids for inference.",
+    )
     parser.add_argument(
         "--no_rule_post_processing",
         action="store_true",
@@ -1354,4 +1361,5 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
+    args.dataset_ids = [int(x) for x in str(args.dataset_ids).replace(",", " ").split() if x]
     main(args=args)
