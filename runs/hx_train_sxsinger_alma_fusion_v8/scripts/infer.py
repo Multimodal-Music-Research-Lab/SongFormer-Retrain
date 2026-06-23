@@ -18,6 +18,14 @@ import numpy as np
 
 scipy.inf = np.inf
 
+# Make third_party imports work before importing MusicFM.
+THIS_FILE = Path(__file__).resolve()
+REPO_ROOT = THIS_FILE.parents[3]
+SRC_SONGFORMER = REPO_ROOT / "src" / "SongFormer"
+CANONICAL_THIRD_PARTY = Path("/home/hbli/songformer/repo/SongFormer/src/third_party")
+sys.path.insert(0, str(REPO_ROOT / "src" / "third_party"))
+sys.path.insert(0, str(CANONICAL_THIRD_PARTY))
+
 import librosa
 import torch
 from ema_pytorch import EMA
@@ -46,7 +54,7 @@ if not SRC_SONGFORMER.exists():
 sys.path.insert(0, str(SRC_SONGFORMER))
 
 # Absolute MusicFM ckpt directory
-MUSICFM_HOME_PATH = str(SRC_SONGFORMER / "ckpts" / "MusicFM")
+MUSICFM_HOME_PATH = "/home/hbli/songformer/repo/SongFormer/src/SongFormer/ckpts/MusicFM"
 
 BEFORE_DOWNSAMPLING_FRAME_RATES = 25
 AFTER_DOWNSAMPLING_FRAME_RATES = 8.333
@@ -740,10 +748,15 @@ def inference(rank, queue_input: mp.Queue, queue_output: mp.Queue, args):
     Model = getattr(module, "Model")
 
     # --- FIX 1: config path resolution ---
-    # allow absolute config path; otherwise resolve to src/SongFormer/configs/<name>
+    # allow absolute config path; otherwise try cwd, repo root, then src/SongFormer/configs.
     cfg_path = Path(args.config_path)
     if not cfg_path.is_absolute():
-        cfg_path = (SRC_SONGFORMER / "configs" / cfg_path).resolve()
+        candidates = [
+            (Path.cwd() / cfg_path).resolve(),
+            (REPO_ROOT / cfg_path).resolve(),
+            (SRC_SONGFORMER / "configs" / cfg_path).resolve(),
+        ]
+        cfg_path = next((candidate for candidate in candidates if candidate.exists()), candidates[-1])
     if not cfg_path.exists():
         raise FileNotFoundError(f"Config not found: {cfg_path}")
 
@@ -777,10 +790,15 @@ def inference(rank, queue_input: mp.Queue, queue_output: mp.Queue, args):
         lyrics_line_token_id = lyrics_tokenizer.convert_tokens_to_ids(lyrics_line_token)
 
     # --- FIX 2: checkpoint path resolution ---
-    # allow absolute checkpoint; otherwise resolve to src/SongFormer/ckpts/<name>
+    # allow absolute checkpoint; otherwise try cwd, repo root, then src/SongFormer/ckpts.
     ckpt_path = Path(args.checkpoint)
     if not ckpt_path.is_absolute():
-        ckpt_path = (SRC_SONGFORMER / "ckpts" / ckpt_path).resolve()
+        candidates = [
+            (Path.cwd() / ckpt_path).resolve(),
+            (REPO_ROOT / ckpt_path).resolve(),
+            (SRC_SONGFORMER / "ckpts" / ckpt_path).resolve(),
+        ]
+        ckpt_path = next((candidate for candidate in candidates if candidate.exists()), candidates[-1])
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
