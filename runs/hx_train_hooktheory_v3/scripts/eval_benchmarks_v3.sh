@@ -13,7 +13,8 @@ CKPT_TAG=$(basename "${CKPT}")
 CKPT_TAG=${CKPT_TAG%.pt}
 CFG=${REPO}/runs/hx_train_hooktheory_v3/configs/SongFormer.yaml
 
-export PYTHONPATH=${REPO}/src/SongFormer:${REPO}/src/third_party:${PYTHONPATH:-}
+CANONICAL_THIRD_PARTY=/home/hbli/songformer/repo/SongFormer/src/third_party
+export PYTHONPATH=${REPO}/src/SongFormer:${REPO}/src/third_party:${CANONICAL_THIRD_PARTY}:${PYTHONPATH:-}
 
 run_full_eval() {
   local name=$1
