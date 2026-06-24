@@ -12,13 +12,13 @@ CKPT=${1:-${RUN}/results/train_output_42/model.ckpt-12000.pt}
 CKPT_TAG=$(basename "${CKPT}")
 CKPT_TAG=${CKPT_TAG%.pt}
 CFG=${REPO}/runs/hx_train_hooktheory_v3/configs/SongFormer.yaml
-HOOK_SCP=/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_full/results/hooktheory_test_unique_636.scp
+HOOK_SCP=/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_full/results/hooktheory_test_full_unique_636.scp
 RAW_ANN_DIR=/mnt/ssd/hbli/datasets/hooktheory/labels
 
-PRED_DIR=${RUN}/results/bench_pred/hooktheory_test_636_${CKPT_TAG}
-EST_DIR=${RUN}/results/eval/hooktheory_test_636_${CKPT_TAG}/est_txt
-ANN_DIR=${RUN}/results/eval/hooktheory_test_636_${CKPT_TAG}/ann_txt_normalized
-METRICS_DIR=${RUN}/results/eval/hooktheory_test_636_${CKPT_TAG}/metrics_partial
+PRED_DIR=${RUN}/results/bench_pred/hooktheory_test_full_636_${CKPT_TAG}
+EST_DIR=${RUN}/results/eval/hooktheory_test_full_636_${CKPT_TAG}/est_txt
+ANN_DIR=${RUN}/results/eval/hooktheory_test_full_636_${CKPT_TAG}/ann_txt_normalized
+METRICS_DIR=${RUN}/results/eval/hooktheory_test_full_636_${CKPT_TAG}/metrics_partial
 
 export PYTHONPATH=${REPO}/src/SongFormer:${REPO}/src/third_party:${PYTHONPATH:-}
 
