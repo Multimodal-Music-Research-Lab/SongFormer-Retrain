@@ -18,6 +18,14 @@ import numpy as np
 
 scipy.inf = np.inf
 
+# Make third_party imports work before importing MusicFM.
+THIS_FILE = Path(__file__).resolve()
+REPO_ROOT = THIS_FILE.parents[3]
+SRC_SONGFORMER = REPO_ROOT / "src" / "SongFormer"
+CANONICAL_THIRD_PARTY = Path("/home/hbli/songformer/repo/SongFormer/src/third_party")
+sys.path.insert(0, str(REPO_ROOT / "src" / "third_party"))
+sys.path.insert(0, str(CANONICAL_THIRD_PARTY))
+
 import librosa
 import torch
 from ema_pytorch import EMA
@@ -45,7 +53,7 @@ if not SRC_SONGFORMER.exists():
 sys.path.insert(0, str(SRC_SONGFORMER))
 
 # Absolute MusicFM ckpt directory
-MUSICFM_HOME_PATH = str(SRC_SONGFORMER / "ckpts" / "MusicFM")
+MUSICFM_HOME_PATH = "/home/hbli/songformer/repo/SongFormer/src/SongFormer/ckpts/MusicFM"
 
 BEFORE_DOWNSAMPLING_FRAME_RATES = 25
 AFTER_DOWNSAMPLING_FRAME_RATES = 8.333

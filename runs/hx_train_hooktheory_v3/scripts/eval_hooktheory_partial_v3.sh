@@ -20,7 +20,8 @@ EST_DIR=${RUN}/results/eval/hooktheory_test_full_636_${CKPT_TAG}/est_txt
 ANN_DIR=${RUN}/results/eval/hooktheory_test_full_636_${CKPT_TAG}/ann_txt_normalized
 METRICS_DIR=${RUN}/results/eval/hooktheory_test_full_636_${CKPT_TAG}/metrics_partial
 
-export PYTHONPATH=${REPO}/src/SongFormer:${REPO}/src/third_party:${PYTHONPATH:-}
+CANONICAL_THIRD_PARTY=/home/hbli/songformer/repo/SongFormer/src/third_party
+export PYTHONPATH=${REPO}/src/SongFormer:${REPO}/src/third_party:${CANONICAL_THIRD_PARTY}:${PYTHONPATH:-}
 
 python ${REPO}/runs/hx_train_hooktheory_v3/scripts/infer_hooktheory.py \
   -i "${HOOK_SCP}" \
