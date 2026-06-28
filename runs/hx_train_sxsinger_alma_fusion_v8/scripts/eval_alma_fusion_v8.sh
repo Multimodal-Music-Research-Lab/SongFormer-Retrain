@@ -5,7 +5,8 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
 export HF_HOME=${HF_HOME:-/home/hbli/songformer/cache/hf_cache}
 
-REPO=/home/hbli/songformer/repo/SongFormer
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 RUN=/mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_alma_fusion_v8
 CKPT=${1:-${RUN}/results/train_output_42/model.ckpt-48000.pt}
 CKPT_TAG=$(basename "${CKPT}")
@@ -18,7 +19,8 @@ PRED_DIR=${RUN}/results/bench_pred/hx_${CKPT_TAG}
 EST_DIR=${RUN}/results/eval/hx_${CKPT_TAG}/est_txt
 METRICS_DIR=${RUN}/results/eval/hx_${CKPT_TAG}/metrics_per_class
 
-export PYTHONPATH=${REPO}/src/SongFormer:${REPO}/src/third_party:${PYTHONPATH:-}
+CANONICAL_THIRD_PARTY=/home/hbli/songformer/repo/SongFormer/src/third_party
+export PYTHONPATH=${REPO}/src/SongFormer:${REPO}/src/third_party:${CANONICAL_THIRD_PARTY}:${PYTHONPATH:-}
 
 python ${REPO}/runs/hx_train_sxsinger_alma_fusion_v8/scripts/infer.py \
   -i ${BENCH_SCP} \
