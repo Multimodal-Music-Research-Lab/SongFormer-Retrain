@@ -1,0 +1,74 @@
+# ALMA-style MERT + SoulX lyrics fusion for SongFormer-style outputs.
+# This config deliberately does not use SongFormer backbone/source tokens.
+
+mert:
+  model_name: m-a-p/MERT-v1-95M
+  sample_rate: 24000
+  frame_hz: 75.0
+  chunk_sec: 5.0
+  hop_sec: 4.0
+  layer: -1
+
+model:
+  mert_model_dir: /home/hbli/songformer/repo/SongFormer/src/third_party/mert/MERT-v1-95M
+  lyrics_tokenizer_dir: /home/hbli/songformer/repo/SongFormer/src/third_party/text_models/allenai_longformer-base-4096
+  line_token: "<LINE>"
+  lyrics_max_length: 2048
+  lyrics_line_max_length: 64
+  num_classes: 8
+  d_model: 384
+  dropout: 0.1
+  lyrics_layers: 6
+  lyrics_heads: 8
+  lyrics_ffn_dim: 1536
+  fusion_layers: 4
+  fusion_block_type: mamba
+
+data:
+  mert_feature_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_alma_fusion_v9/results/mert_features
+  train_hx:
+    hx_label_jsonl: /mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl
+    hx_split_ids: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/train_hx.txt
+    hx_audio_root: /mnt/ssd/hbli/datasets/songformer/songformdb/HX/audios
+    hx_lyrics_dir: /mnt/ssd/hbli/datasets/songformer/songformdb/HX/soulxsinger_lyrics
+  val_hx:
+    hx_label_jsonl: /mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl
+    hx_split_ids: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results/val.txt
+    hx_audio_root: /mnt/ssd/hbli/datasets/songformer/songformdb/HX/audios
+    hx_lyrics_dir: /mnt/ssd/hbli/datasets/songformer/songformdb/HX/soulxsinger_lyrics
+  train_hook:
+    hook_label_jsonl: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_full/results/HookTheory_full_for_model.jsonl
+    hook_split_ids: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_full/results/train_hook_full.txt
+    hook_audio_root: /mnt/ssd/datasets/SheetSageAudio/full/打包结果_audio
+    hook_lyrics_dir: /mnt/ssd/hbli/songformer/runs/soulxsinger_lyrics/hooktheory
+  hx_bench_scp: /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/hx_bench.scp
+  hx_bench_lyrics_dir: /mnt/ssd/hbli/datasets/songformer/songformbench/data/soulxsinger_lyrics/HarmonixSet
+
+loss:
+  weight_boundary: 0.2
+  weight_function: 0.8
+  boundary_widen_sec: 0.36
+  focal_weight: 0.2
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+train:
+  run_dir: /mnt/ssd/hbli/songformer/runs/hx_train_sxsinger_alma_fusion_v9
+  slice_dur: 240.0
+  batch_size: 1
+  accumulation_steps: 4
+  num_workers: 2
+  max_steps: 48000
+  warmup_steps: 1200
+  save_interval: 3200
+  eval_interval: 3200
+  eval_max_batches: 200
+  log_interval: 10
+  lr: 0.0001
+  betas: [0.8, 0.999]
+  weight_decay: 0.0000003
+  grad_clip: 1.0
+
+postprocess:
+  boundary_threshold: 0.5
+  min_boundary_distance_sec: 3.0
