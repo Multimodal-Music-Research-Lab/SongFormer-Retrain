@@ -9,6 +9,9 @@ export WANDB_MODE=disabled
 # export WANDB_API_KEY="YOUR_KEY"
 
 # ===== Settings =====
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd "${SCRIPT_DIR}/../../.." && pwd)
+
 cd ${REPO}/src/SongFormer
 export PYTHONPATH=$(realpath .):${PYTHONPATH:-}
 
@@ -20,9 +23,6 @@ export NCCL_IB_DISABLE=1
 
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/home/hbli/songformer/cache/hf_cache
-
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO=$(cd "${SCRIPT_DIR}/../../.." && pwd)
 
 # export TORCH_LOGS=attention
 
