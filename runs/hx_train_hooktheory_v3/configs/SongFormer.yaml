@@ -83,7 +83,7 @@ train_dataset:
         "internal_tmp_id": "SongForm-HX-8Class",
         "dataset_type": "SongForm-HX-8Class",
         "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/420s/layer_10",
-        "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl",
+        "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX-adjust-window_v2_for_model.jsonl",
         "split_ids_path": "/home/hbli/songformer/repo/SongFormer/runs/hx_train_hooktheory_v3/results/train_hx.txt",
         "multiplier": 4
       },
@@ -119,7 +119,7 @@ eval_dataset:
         "internal_tmp_id": "SongForm-HX-8Classs_val",
         "dataset_type": "SongForm-HX-8Class",
         "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_retrain_v1/results/ssl/muq/420s/layer_10",
-        "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX_for_model.jsonl",
+        "label_path": "/mnt/ssd/hbli/datasets/songformer/songformdb/HX/SongFormDB-HX-adjust-window_v2_for_model.jsonl",
         "split_ids_path": "/home/hbli/songformer/repo/SongFormer/runs/hx_train_hooktheory_v3/results/val.txt",
         "multiplier": 1
       }
@@ -166,11 +166,11 @@ optimizer:
 # ============================
 
 args:
-  run_name: hx_train_hooktheory_v3
+  run_name: hx_train_hooktheory_v3_hxboundary_adjusted
   model_name: SongFormer
   save_interval: 800
   eval_interval: 800
-  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3/results_with_loss/train_output
+  checkpoint_dir: /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3_hxboundary_adjusted/results/train_output
   max_epochs: 1000
   max_steps: 12010
   tags: null

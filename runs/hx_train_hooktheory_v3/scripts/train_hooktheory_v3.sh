@@ -9,8 +9,8 @@ export WANDB_MODE=disabled
 # export WANDB_API_KEY="YOUR_KEY"
 
 # ===== Settings =====
-cd /home/hbli/songformer/repo/SongFormer/src/SongFormer
-export PYTHONPATH=$(realpath .):$PYTHONPATH
+cd ${REPO}/src/SongFormer
+export PYTHONPATH=$(realpath .):${PYTHONPATH:-}
 
 export HYDRA_FULL_ERROR=1
 export OMP_NUM_THREADS=1
@@ -21,11 +21,14 @@ export NCCL_IB_DISABLE=1
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/home/hbli/songformer/cache/hf_cache
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=$(cd "${SCRIPT_DIR}/../../.." && pwd)
+
 # export TORCH_LOGS=attention
 
 gpustat --id $CUDA_VISIBLE_DEVICES
 
-CFG=/home/hbli/songformer/repo/SongFormer/runs/hx_train_hooktheory_v3/configs/SongFormer.yaml
+CFG=${REPO}/runs/hx_train_hooktheory_v3/configs/SongFormer.yaml
 INIT_SEED=42
 
 # ===== Train =====

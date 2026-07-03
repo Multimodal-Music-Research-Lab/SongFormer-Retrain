@@ -7,7 +7,7 @@ export HF_HOME=${HF_HOME:-/home/hbli/songformer/cache/hf_cache}
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "${SCRIPT_DIR}/../../.." && pwd)
-RUN=/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3
+RUN=/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3_hxboundary_adjusted
 CKPT=${1:-${RUN}/results/train_output_42/model.ckpt-12000.pt}
 CKPT_TAG=$(basename "${CKPT}")
 CKPT_TAG=${CKPT_TAG%.pt}
