@@ -1,4 +1,10 @@
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+SRC_DIR="${REPO_ROOT}/src/SongFormer"
+export SONGFORMER_REPO_ROOT="${REPO_ROOT}"
 
 # ===== GPU =====
 export CUDA_VISIBLE_DEVICES=0
@@ -9,8 +15,8 @@ export WANDB_MODE=disabled
 # export WANDB_API_KEY="YOUR_KEY"
 
 # ===== Settings =====
-cd /home/hbli/songformer/repo/SongFormer/src/SongFormer
-export PYTHONPATH=$(realpath .):$PYTHONPATH
+cd "${SRC_DIR}"
+export PYTHONPATH="${SRC_DIR}:${REPO_ROOT}/src/third_party:/home/hbli/songformer/repo/SongFormer/src/third_party:${PYTHONPATH:-}"
 
 export HYDRA_FULL_ERROR=1
 export OMP_NUM_THREADS=1
@@ -25,7 +31,7 @@ export HF_HOME=/home/hbli/songformer/cache/hf_cache
 
 gpustat --id $CUDA_VISIBLE_DEVICES
 
-CFG=/home/hbli/songformer/repo/SongFormer/runs/hx_retrain_v1/configs/SongFormer.yaml
+CFG="${REPO_ROOT}/runs/hx_retrain_v1/configs/SongFormer.yaml"
 INIT_SEED=42
 
 # ===== Train =====
@@ -34,4 +40,3 @@ accelerate launch --config_file train/accelerate_config/single_gpu.yaml \
   --config "${CFG}" \
   --log_interval 5 \
   --init_seed "${INIT_SEED}"
-

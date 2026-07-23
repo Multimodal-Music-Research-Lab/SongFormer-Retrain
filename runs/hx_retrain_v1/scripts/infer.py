@@ -46,8 +46,17 @@ if not SRC_SONGFORMER.exists():
 # Make sure imports like "from dataset..." work
 sys.path.insert(0, str(SRC_SONGFORMER))
 
-# Absolute MusicFM ckpt directory (fix your earlier FileNotFoundError)
-MUSICFM_HOME_PATH = str(SRC_SONGFORMER / "ckpts" / "MusicFM")
+# Prefer worktree-local checkpoints, then fall back to the canonical shared copy.
+musicfm_home = SRC_SONGFORMER / "ckpts" / "MusicFM"
+if not musicfm_home.exists():
+    musicfm_home = (
+        Path("/home/hbli/songformer/repo/SongFormer")
+        / "src"
+        / "SongFormer"
+        / "ckpts"
+        / "MusicFM"
+    )
+MUSICFM_HOME_PATH = str(musicfm_home)
 
 BEFORE_DOWNSAMPLING_FRAME_RATES = 25
 AFTER_DOWNSAMPLING_FRAME_RATES = 8.333
@@ -479,7 +488,12 @@ if __name__ == "__main__":
         help="Number of threads per GPU, default is 1",
     )
     parser.add_argument("--model", type=str, required=True, help="Model name under models/")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint path (.pt). Absolute path OK.")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Checkpoint path (.pt or .safetensors). Absolute path OK.",
+    )
     parser.add_argument("--config_path", type=str, required=True, help="Config yaml path. Absolute path OK.")
     parser.add_argument(
         "--no_rule_post_processing",
