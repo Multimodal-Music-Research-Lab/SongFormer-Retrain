@@ -250,6 +250,7 @@ def append_training_loss_log(log_path: str, row: dict):
         "loss_awl",
         "loss_total",
         "loss_section",
+        "loss_section_25hz",
         "loss_function",
         "learning_rate",
     ]
@@ -417,6 +418,8 @@ def main(args, hparams):
                                 list(model.parameters()),
                                 accelerator=accelerator,
                             )
+                            if "loss_section_25hz" in losses:
+                                loss_sum = loss_sum + losses["loss_section_25hz"]
 
                             accelerator.backward(loss_sum)
 
@@ -447,6 +450,12 @@ def main(args, hparams):
                                     "loss_awl": float(loss_sum.item()),
                                     "loss_total": float(loss.item()),
                                     "loss_section": float(losses["loss_section"].item()),
+                                    "loss_section_25hz": float(
+                                        losses.get(
+                                            "loss_section_25hz",
+                                            losses["loss_section"].new_zeros(()),
+                                        ).item()
+                                    ),
                                     "loss_function": float(losses["loss_function"].item()),
                                     "learning_rate": float(learning_rate),
                                 },
@@ -463,6 +472,10 @@ def main(args, hparams):
                                     "training/loss_section": losses[
                                         "loss_section"
                                     ].item(),
+                                    "training/loss_section_25hz": losses.get(
+                                        "loss_section_25hz",
+                                        losses["loss_section"].new_zeros(()),
+                                    ).item(),
                                     "training/learning_rate": learning_rate,
                                     "training/batch_size": int(
                                         hparams.train_dataloader.batch_size

@@ -46,6 +46,15 @@ class Dataset(Dataset):
         self.dataset_id2label_mask = {}
         self.output_logits_frame_rates = self.hparams.output_logits_frame_rates
         self.downsample_rates = self.hparams.downsample_rates
+        self.use_highres_boundary = getattr(
+            self.hparams, "use_highres_boundary", False
+        )
+        self.highres_boundary_frame_rate = float(
+            getattr(self.hparams, "highres_boundary_frame_rate", 25.0)
+        )
+        self.highres_boundary_num_neighbors = int(
+            getattr(self.hparams, "highres_boundary_num_neighbors", 30)
+        )
         self.valid_data_ids = []
         self.SLICE_DUR = self.hparams.slice_dur
 
@@ -198,6 +207,46 @@ class Dataset(Dataset):
         assert this_time <= self.SLICE_DUR
         return int(this_time * self.output_logits_frame_rates)
 
+    def _map_mask_to_highres(self, source_mask, target_length):
+        source_mask = np.asarray(source_mask, dtype=bool)
+        target_times = (
+            np.arange(target_length, dtype=np.float64)
+            / self.highres_boundary_frame_rate
+        )
+        source_indices = np.floor(
+            target_times * self.output_logits_frame_rates
+        ).astype(np.int64)
+        source_indices = np.clip(source_indices, 0, len(source_mask) - 1)
+        return source_mask[source_indices]
+
+    def _add_highres_boundary_targets(self, item):
+        if item is None or not self.use_highres_boundary:
+            return item
+
+        target_length = int(item["input_embedding"].shape[0])
+        true_boundary = np.zeros(target_length, dtype=float)
+        for boundary_time, _ in item["msa_info"][1:-1]:
+            boundary_frame = min(
+                int(float(boundary_time) * self.highres_boundary_frame_rate),
+                target_length - 1,
+            )
+            true_boundary[boundary_frame] = 1.0
+
+        lowres_boundary_mask = item.get(
+            "boundary_mask", np.zeros_like(item["mask"], dtype=bool)
+        )
+        item["masks_25hz"] = self._map_mask_to_highres(
+            item["mask"], target_length
+        )
+        item["boundary_mask_25hz"] = self._map_mask_to_highres(
+            lowres_boundary_mask, target_length
+        )
+        item["true_boundary_25hz"] = true_boundary
+        item["widen_true_boundary_25hz"] = self.widen_temporal_events(
+            true_boundary, num_neighbors=self.highres_boundary_num_neighbors
+        )
+        return item
+
     def __getitem__(self, idx):
         try:
             internal_tmp_id, dataset_label, utt, adapter_str = self.valid_data_ids[idx]
@@ -206,25 +255,28 @@ class Dataset(Dataset):
                 assert isinstance(adapter_str, str)
                 if adapter_str == "HookTheoryAdapter":
                     start_time = int(utt.split("_")[-1])
-                    return self.adapter_obj[internal_tmp_id].get_item_json(
+                    item = self.adapter_obj[internal_tmp_id].get_item_json(
                         utt=utt,
                         start_time=start_time,
                         end_time=start_time + self.SLICE_DUR,
                     )
+                    return self._add_highres_boundary_targets(item)
                 elif adapter_str == "GeminiOnlyLabelAdapter":
                     start_time = int(utt.split("_")[-1])
-                    return self.adapter_obj[internal_tmp_id].get_item_json(
+                    item = self.adapter_obj[internal_tmp_id].get_item_json(
                         utt=utt,
                         start_time=start_time,
                         end_time=start_time + self.SLICE_DUR,
                     )
+                    return self._add_highres_boundary_targets(item)
                 elif adapter_str == "HookTheoryV1Adapter":
                     start_time = int(utt.split("_")[-1])
-                    return self.adapter_obj[internal_tmp_id].get_item_json(
+                    item = self.adapter_obj[internal_tmp_id].get_item_json(
                         utt=utt,
                         start_time=start_time,
                         end_time=start_time + self.SLICE_DUR,
                     )
+                    return self._add_highres_boundary_targets(item)
                 else:
                     raise ValueError(f"Unknown adapter: {adapter_str}")
 
@@ -335,7 +387,7 @@ class Dataset(Dataset):
             )
             msa_info.append((float(time_R), "end"))
 
-            return {
+            item = {
                 "data_id": internal_tmp_id + "_" + utt_id_with_start_sec,
                 "input_embedding": input_embedding,
                 "mask": mask,
@@ -351,6 +403,7 @@ class Dataset(Dataset):
                     self.dataset_id_to_dataset_id[dataset_label]
                 ],
             }
+            return self._add_highres_boundary_targets(item)
         except Exception as e:
             tb_str = traceback.format_exc()
             logger.error(
@@ -393,6 +446,19 @@ class Dataset(Dataset):
             )
             boundary_mask = np.zeros((len(batch), max_sequence_length), dtype=bool)
             function_mask = np.zeros((len(batch), max_sequence_length), dtype=bool)
+            if self.use_highres_boundary:
+                masks_25hz = np.ones(
+                    (len(batch), max_embeddings_length), dtype=bool
+                )
+                true_boundaries_25hz = np.zeros(
+                    (len(batch), max_embeddings_length), dtype=float
+                )
+                widen_true_boundaries_25hz = np.zeros(
+                    (len(batch), max_embeddings_length), dtype=float
+                )
+                boundary_mask_25hz = np.zeros(
+                    (len(batch), max_embeddings_length), dtype=bool
+                )
             true_function_lists = []
             msa_infos = []
             dataset_ids = []
@@ -425,6 +491,18 @@ class Dataset(Dataset):
                     function_mask[idx, : item["mask"].shape[0]] = item.get(
                         "function_mask", np.zeros(item["mask"].shape[0], dtype=bool)
                     )[:max_sequence_length]
+                if self.use_highres_boundary:
+                    highres_len = item["true_boundary_25hz"].shape[0]
+                    masks_25hz[idx, :highres_len] = item["masks_25hz"]
+                    true_boundaries_25hz[idx, :highres_len] = item[
+                        "true_boundary_25hz"
+                    ]
+                    widen_true_boundaries_25hz[idx, :highres_len] = item[
+                        "widen_true_boundary_25hz"
+                    ]
+                    boundary_mask_25hz[idx, :highres_len] = item[
+                        "boundary_mask_25hz"
+                    ]
 
             # convert to torch tensors
             input_embeddings = torch.from_numpy(input_embeddings).float()
@@ -434,6 +512,17 @@ class Dataset(Dataset):
             true_functions = torch.from_numpy(true_functions).float()
             boundary_mask = torch.from_numpy(boundary_mask).bool()
             function_mask = torch.from_numpy(function_mask).bool()
+            if self.use_highres_boundary:
+                masks_25hz = torch.from_numpy(masks_25hz).bool()
+                true_boundaries_25hz = torch.from_numpy(
+                    true_boundaries_25hz
+                ).float()
+                widen_true_boundaries_25hz = torch.from_numpy(
+                    widen_true_boundaries_25hz
+                ).float()
+                boundary_mask_25hz = torch.from_numpy(
+                    boundary_mask_25hz
+                ).bool()
             true_function_lists = [
                 torch.tensor(x, dtype=torch.long) for x in true_function_lists
             ]
@@ -457,6 +546,15 @@ class Dataset(Dataset):
                 "boundary_mask": boundary_mask,
                 "function_mask": function_mask,
             }
+            if self.use_highres_boundary:
+                return_json.update(
+                    {
+                        "masks_25hz": masks_25hz,
+                        "true_boundaries_25hz": true_boundaries_25hz,
+                        "widen_true_boundaries_25hz": widen_true_boundaries_25hz,
+                        "boundary_mask_25hz": boundary_mask_25hz,
+                    }
+                )
 
             return return_json
         except Exception as e:

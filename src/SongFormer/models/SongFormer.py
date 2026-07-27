@@ -37,6 +37,51 @@ class Head(nn.Module):
         return x.reshape(batch, T, -1)
 
 
+class HighResolutionBoundaryHead(nn.Module):
+    """A lightweight boundary-only branch that preserves the 25 Hz input grid."""
+
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim=128,
+        kernel_size=5,
+        dilations=(1, 2, 4, 8),
+        dropout=0.1,
+    ):
+        super().__init__()
+        if kernel_size % 2 == 0:
+            raise ValueError("high-resolution boundary kernel_size must be odd")
+
+        self.input_proj = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+        )
+        conv_layers = []
+        for dilation in dilations:
+            padding = dilation * (kernel_size - 1) // 2
+            conv_layers.extend(
+                [
+                    nn.Conv1d(
+                        hidden_dim,
+                        hidden_dim,
+                        kernel_size=kernel_size,
+                        dilation=dilation,
+                        padding=padding,
+                    ),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                ]
+            )
+        self.temporal_conv = nn.Sequential(*conv_layers)
+        self.output_proj = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x):
+        x = self.input_proj(x)
+        x = self.temporal_conv(x.transpose(1, 2)).transpose(1, 2)
+        return self.output_proj(x).squeeze(-1)
+
+
 class WrapedTransformerEncoder(nn.Module):
     def __init__(
         self, input_dim, transformer_input_dim, num_layers=1, nhead=8, dropout=0.1
@@ -283,6 +328,46 @@ class Model(nn.Module):
         )
         self.boundary_head = Head(config.transformer_input_dim, 1)
         self.function_head = Head(config.transformer_input_dim, config.num_classes)
+        self.use_highres_boundary = getattr(config, "use_highres_boundary", False)
+        self.highres_boundary_frame_rate = float(
+            getattr(config, "highres_boundary_frame_rate", 25.0)
+        )
+        self.eval_boundary_mode = str(
+            getattr(config, "eval_boundary_mode", "lowres")
+        )
+        if self.use_highres_boundary:
+            self.highres_boundary_head = HighResolutionBoundaryHead(
+                input_dim=config.input_dim_raw,
+                hidden_dim=getattr(config, "highres_boundary_hidden_dim", 128),
+                kernel_size=getattr(config, "highres_boundary_kernel_size", 5),
+                dilations=tuple(
+                    getattr(config, "highres_boundary_dilations", [1, 2, 4, 8])
+                ),
+                dropout=getattr(config, "highres_boundary_dropout", 0.1),
+            )
+        else:
+            self.highres_boundary_head = None
+
+    def postprocess_logits(self, logits):
+        if self.eval_boundary_mode == "lowres":
+            return postprocess_functional_structure(logits=logits, config=self.config)
+        if self.eval_boundary_mode != "highres":
+            raise ValueError(
+                f"Unsupported eval_boundary_mode: {self.eval_boundary_mode}"
+            )
+        if "boundary_logits_25hz" not in logits:
+            raise KeyError("High-resolution boundary logits are unavailable")
+
+        postprocess_inputs = {
+            "boundary_logits": logits["boundary_logits_25hz"],
+            "function_logits": logits["function_logits"],
+        }
+        return postprocess_functional_structure(
+            logits=postprocess_inputs,
+            config=self.config,
+            boundary_frame_rates=self.highres_boundary_frame_rate,
+            function_frame_rates=float(self.config.frame_rates),
+        )
 
     def cal_metrics(self, gt_info: MsaInfo, msa_info: MsaInfo):
         assert gt_info[-1][1] == "end" and msa_info[-1][1] == "end", (
@@ -370,9 +455,7 @@ class Model(nn.Module):
                 expanded_mask, -float("inf")
             )
 
-            msa_info = postprocess_functional_structure(
-                logits=logits, config=self.config
-            )
+            msa_info = self.postprocess_logits(logits)
             gt_info = batch["msa_infos"][0]
             results = self.cal_metrics(gt_info=gt_info, msa_info=msa_info)
 
@@ -406,6 +489,10 @@ class Model(nn.Module):
         with_logits=False,
     ):
         with torch.no_grad():
+            boundary_logits_25hz = None
+            if self.highres_boundary_head is not None:
+                boundary_logits_25hz = self.highres_boundary_head(input_embeddings)
+
             input_embeddings = self.mixed_win_downsample(input_embeddings)
             input_embeddings = self.input_norm(input_embeddings)
             logits = self.down_sample_conv(input_embeddings)
@@ -424,6 +511,8 @@ class Model(nn.Module):
                 "function_logits": function_logits,
                 "boundary_logits": boundary_logits,
             }
+            if boundary_logits_25hz is not None:
+                logits["boundary_logits_25hz"] = boundary_logits_25hz
 
             expanded_mask = label_id_masks.expand(
                 -1, logits["function_logits"].size(1), -1
@@ -432,9 +521,7 @@ class Model(nn.Module):
                 expanded_mask, -float("inf")
             )
 
-            msa_info = postprocess_functional_structure(
-                logits=logits, config=self.config
-            )
+            msa_info = self.postprocess_logits(logits)
 
         return (msa_info, logits) if with_logits else msa_info
 
@@ -481,22 +568,51 @@ class Model(nn.Module):
         loss_section *= self.config.loss_weight_section
         loss_function *= self.config.loss_weight_function
 
+        loss_section_25hz = None
+        if self.use_highres_boundary:
+            loss_section_25hz = F.binary_cross_entropy_with_logits(
+                outputs["boundary_logits_25hz"],
+                batch["widen_true_boundaries_25hz"],
+                reduction="none",
+            )
+            loss_section_25hz += (
+                self.config.boundary_tvloss_weight
+                * self.boundary_TVLoss1D(
+                    pred=outputs["boundary_logits_25hz"],
+                    target=batch["widen_true_boundaries_25hz"],
+                )
+            )
+            highres_float_masks = (~batch["masks_25hz"]).float()
+            highres_boundary_mask = (~batch["boundary_mask_25hz"]).float()
+            loss_section_25hz = torch.mean(
+                highres_boundary_mask * highres_float_masks * loss_section_25hz
+            )
+            loss_section_25hz *= self.config.loss_weight_section_25hz
+
         if self.config.learn_label:
             loss += loss_function
         if self.config.learn_segment:
             loss += loss_section
+            if loss_section_25hz is not None:
+                loss += loss_section_25hz
 
         losses.update(
             loss=loss,
             loss_section=loss_section,
             loss_function=loss_function,
         )
+        if loss_section_25hz is not None:
+            losses["loss_section_25hz"] = loss_section_25hz
         if prefix:
             losses = prefix_dict(losses, prefix)
         return losses
 
     def forward_func(self, batch):
         input_embeddings = batch["input_embeddings"]
+        boundary_logits_25hz = None
+        if self.highres_boundary_head is not None:
+            boundary_logits_25hz = self.highres_boundary_head(input_embeddings)
+
         input_embeddings = self.mixed_win_downsample(input_embeddings)
         input_embeddings = self.input_norm(input_embeddings)
         logits = self.down_sample_conv(input_embeddings)
@@ -513,6 +629,8 @@ class Model(nn.Module):
             "function_logits": function_logits,
             "boundary_logits": boundary_logits,
         }
+        if boundary_logits_25hz is not None:
+            logits["boundary_logits_25hz"] = boundary_logits_25hz
         return logits
 
     def forward(self, batch):
