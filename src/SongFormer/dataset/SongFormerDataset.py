@@ -107,8 +107,14 @@ class Dataset(Dataset):
                 all_input_embedding_dirs = dataset_abstract_item[
                     "input_embedding_dir"
                 ].split()
-                label_path = dataset_abstract_item["label_path"]
+                label_path = dataset_abstract_item.get("label_path")
+                label_dir = dataset_abstract_item.get("label_dir")
                 split_ids_path = dataset_abstract_item["split_ids_path"]
+                if (label_path is None) == (label_dir is None):
+                    raise ValueError(
+                        f"{internal_tmp_id} must define exactly one of label_path "
+                        "or label_dir"
+                    )
 
                 self.input_embedding_dir[internal_tmp_id] = dataset_abstract_item[
                     "input_embedding_dir"
@@ -125,7 +131,16 @@ class Dataset(Dataset):
                     for line in f:
                         if not line.strip():
                             continue
-                        split_ids.append(line.strip())
+                        split_id = line.strip()
+                        if Path(split_id).suffix.lower() in {
+                            ".flac",
+                            ".m4a",
+                            ".mp3",
+                            ".ogg",
+                            ".wav",
+                        }:
+                            split_id = Path(split_id).stem
+                        split_ids.append(split_id)
                 split_ids = set(split_ids)
 
                 # filter valid ids by split membership
@@ -146,9 +161,14 @@ class Dataset(Dataset):
                 )
                 for i in range(dataset_abstract_item["multiplier"]):
                     self.valid_data_ids.extend(valid_data_ids)
-                self.init_segments(
-                    label_path=label_path, internal_tmp_id=internal_tmp_id
-                )
+                if label_dir is not None:
+                    self.init_segments_from_text_dir(
+                        label_dir=label_dir, internal_tmp_id=internal_tmp_id
+                    )
+                else:
+                    self.init_segments(
+                        label_path=label_path, internal_tmp_id=internal_tmp_id
+                    )
 
         logger.info(f"{uniq_id_nums} valid data ids, {len(self.valid_data_ids)} total")
         rng = np.random.default_rng(42)
@@ -177,6 +197,68 @@ class Dataset(Dataset):
                     -1 if x[1] == "end" else self.label_to_id[x[1]]
                     for x in line_data["labels"]
                 ]
+
+    def init_segments_from_text_dir(
+        self,
+        label_dir,
+        internal_tmp_id,
+    ):
+        """Load complete song annotations written as '<time> <label>' lines."""
+        label_paths = sorted(Path(label_dir).glob("*.txt"))
+        if not label_paths:
+            raise ValueError(f"No label files found in {label_dir}")
+
+        for label_path in label_paths:
+            labels = []
+            with label_path.open(encoding="utf-8") as f:
+                for line_number, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    fields = line.split(maxsplit=1)
+                    time_text = fields[0]
+                    if len(fields) == 1:
+                        if not labels:
+                            raise ValueError(
+                                f"{label_path}:{line_number}: first boundary "
+                                "has no label"
+                            )
+                        label = labels[-1][1]
+                        logger.warning(
+                            f"{label_path}:{line_number}: missing label; "
+                            f"inherit '{label}'"
+                        )
+                    else:
+                        label = fields[1]
+                    if " and " in label:
+                        original_label = label
+                        label = label.split(" and ", maxsplit=1)[0]
+                        logger.warning(
+                            f"{label_path}:{line_number}: composite label "
+                            f"'{original_label}'; use first label '{label}'"
+                        )
+                    labels.append((float(time_text), label))
+
+            if len(labels) < 2 or labels[-1][1] != "end":
+                raise ValueError(f"{label_path}: final annotation must be 'end'")
+            times = [time for time, _ in labels]
+            if not np.all(np.asarray(times[:-1]) < np.asarray(times[1:])):
+                raise ValueError(f"{label_path}: timestamps must be strictly increasing")
+
+            unknown_labels = sorted(
+                {label for _, label in labels[:-1] if label not in self.label_to_id}
+            )
+            if unknown_labels:
+                raise ValueError(
+                    f"{label_path}: unknown labels {', '.join(unknown_labels)}"
+                )
+
+            hybrid_id = f"{internal_tmp_id}_{label_path.stem}"
+            self.time_datas[hybrid_id] = times
+            self.label_datas[hybrid_id] = [
+                -1 if label == "end" else self.label_to_id[label]
+                for _, label in labels
+            ]
 
     def __len__(self):
         return len(self.valid_data_ids)
