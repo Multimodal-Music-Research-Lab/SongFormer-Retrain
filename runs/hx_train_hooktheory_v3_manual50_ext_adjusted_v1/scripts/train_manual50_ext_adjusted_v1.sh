@@ -17,6 +17,9 @@ RUN=/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v3_manual50_ext_adjusted_v
 CFG=${REPO}/runs/hx_train_hooktheory_v3_manual50_ext_adjusted_v1/configs/SongFormer.yaml
 HOOK_ADJUSTED=/mnt/ssd/hbli/datasets/hooktheory/HookTheory-user-madmom-adjusted-v3-compatible_for_model.jsonl
 EXT_ADJUSTED=/mnt/ssd/hbli/datasets/songformer/songformdb/data/Ext/SongFormDB-Ext-adjust-local-restriction_for_model.jsonl
+EXT_BASE=/mnt/ssd/hbli/datasets/songformer/songformdb/data/Ext/SongFormDB-Ext.jsonl
+HOOK_FAILURES=/mnt/ssd/hbli/madmom/outputs/hooktheory_user_adjusted/failures.csv
+EXT_FAILURES=/mnt/ssd/hbli/madmom/outputs/songformerdb/Ext_adjusted_local_restriction/failures.csv
 
 for required_path in "${HOOK_ADJUSTED}" "${EXT_ADJUSTED}"; do
   if [ ! -s "${required_path}" ]; then
@@ -24,6 +27,20 @@ for required_path in "${HOOK_ADJUSTED}" "${EXT_ADJUSTED}"; do
     exit 1
   fi
 done
+
+for failure_manifest in "${HOOK_FAILURES}" "${EXT_FAILURES}"; do
+  if [ -s "${failure_manifest}" ]; then
+    echo "Adjusted-label pipeline reported failures: ${failure_manifest}" >&2
+    exit 1
+  fi
+done
+
+ext_expected=$(grep -cve '^[[:space:]]*$' "${EXT_BASE}")
+ext_actual=$(grep -cve '^[[:space:]]*$' "${EXT_ADJUSTED}")
+if [ "${ext_actual}" -ne "${ext_expected}" ]; then
+  echo "Incomplete Ext adjusted JSONL: ${ext_actual}/${ext_expected} rows" >&2
+  exit 1
+fi
 
 python "${REPO}/runs/hx_train_hooktheory_v3_manual50_ext_adjusted_v1/tools/prepare_ext_train_split.py"
 python "${REPO}/runs/hx_train_hooktheory_v3_manual50_ext_adjusted_v1/tools/sample_manual_full_train50.py" \
