@@ -189,13 +189,30 @@ class Dataset(Dataset):
                     continue
                 line_data = json.loads(line)
                 hybrid_id = internal_tmp_id + "_" + line_data["id"]
-                self.time_datas[hybrid_id] = [x[0] for x in line_data["labels"]]
+                normalized_labels = []
+                for label_item in line_data["labels"]:
+                    if isinstance(label_item, dict):
+                        normalized_labels.append(
+                            (label_item["start"], label_item["label"])
+                        )
+                    elif (
+                        isinstance(label_item, (list, tuple))
+                        and len(label_item) == 2
+                    ):
+                        normalized_labels.append((label_item[0], label_item[1]))
+                    else:
+                        raise ValueError(
+                            f"{label_path}: invalid label item for "
+                            f"{line_data['id']}: {label_item}"
+                        )
+
+                self.time_datas[hybrid_id] = [x[0] for x in normalized_labels]
                 self.time_datas[hybrid_id] = list(
                     map(float, self.time_datas[hybrid_id])
                 )
                 self.label_datas[hybrid_id] = [
                     -1 if x[1] == "end" else self.label_to_id[x[1]]
-                    for x in line_data["labels"]
+                    for x in normalized_labels
                 ]
 
     def init_segments_from_text_dir(
