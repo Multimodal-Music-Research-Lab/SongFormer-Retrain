@@ -98,7 +98,7 @@ train_dataset:
         ],
         "input_embedding_dir": "/mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/musicfm/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/muq/30s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/musicfm/420s/layer_10 /mnt/ssd/hbli/songformer/runs/hx_train_hooktheory_v1/results/ssl/muq/420s/layer_10",
         "split_ids_path": "/home/hbli/songformer/repo/SongFormer/runs/hx_train_hooktheory_v3/results/train.txt",
-        "multiplier": 4
+        "multiplier": 1
       },
 
       # ====== HookTheory fully annotated manual train50 ======
